@@ -1,0 +1,31 @@
+# ---------------------------------------------------------------------------
+# KleosHQ workspace repository
+# Versions only the shared material at the root (stuff/, notes, artifacts).
+# Each subproject below is its own git repository and is versioned there.
+# ---------------------------------------------------------------------------
+
+# Subprojects with their own repository
+/kleoshq-ingestion-analyzer/
+/kleoshq-ingestion-processor/
+/kleoshq-public-www/
+/kleoshq-sitewitness-agent/
+/kleoshq-woocommerce-agent/
+/kleoshq_eventstore_api/
+/wp-sitewitness/
+/wp-storerelay/
+
+# Secrets: contains live database credentials
+/stuff/procs/db_restore.txt
+
+# Full data dumps: real customer data, large
+/stuff/*.sql.zip
+/stuff/**/*.dump
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+__MACOSX/
