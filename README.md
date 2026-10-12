@@ -43,7 +43,7 @@ kleoshq-ingestion-processor            POST /api/process
   - diffs each pending report against the previous processed one
   - writes a wp.events patch to ingestions.results, status 'processed'
     (or deletes the row when nothing changed)
-        │  POST { source_id }    (not wired yet: called manually / by a future trigger)
+        │  POST { source_id }    in the background, when ANALYZER_URL is set
         ▼
 kleoshq-ingestion-analyzer             POST /api/analyze
   - pre-analyzes every processed, not-yet-analyzed row in code
@@ -135,16 +135,17 @@ Vercel Function: `POST /api/process { source_id }`.
 - Takes every `pending` `sitewitness_report` of the source, oldest first; marks it `processing`.
 - First report of a source: a single `snapshot.initial` event with the full site state. Later reports: a diff against the last `processed` one, as `wp.events` (`plugin.added/removed`, `mu_plugin.*`, `wp_version.changed`, `admin_user.*`, `suspicious_user.detected`, `critical_option.changed`, `elementor_snippet.*`, `file.added/removed/modified`).
 - Stores the patch in `results` and marks the row `processed`; deletes rows whose diff is empty; marks `failed` with details in `errors` on error.
+- When a run leaves at least one row `processed` and `ANALYZER_URL` is set, calls the analyzer for the source in the background (`waitUntil`), so the agent never waits for the AI.
 - Uses `pg` for a localhost DB, the Neon serverless driver otherwise. `node simulate.mjs <source_id>` triggers it locally.
 
-Env: `NEON_DATABASE_URL`, optional `LOG_LEVEL=debug`.
+Env: `NEON_DATABASE_URL`, optional `ANALYZER_URL`, `ANALYZER_TRIGGER_TIMEOUT_MS`, `LOG_LEVEL=debug`.
 
 ### kleoshq-ingestion-analyzer
 
 Vercel Function: `POST /api/analyze { source_id }` (optional `Authorization: Bearer WEBHOOK_SECRET`).
 
 - Analyzes every `processed` `sitewitness_report` of the source with `analyzed_at IS NULL`, oldest first, within a time budget (`ANALYZE_TIME_BUDGET_MS`, 240s; `maxDuration` 300s). Failed rows stay unanalyzed and are retried on the next call.
-- **Pre-analysis in code** before the AI sees anything: groups events, classifies file changes (`wp_version_upgrade`, `extensions_update`, `few_changes`, `unexplained_mass_change`, `initial_snapshot`), summarizes mass changes per folder, verifies mu-plugins by MD5 against copies shipped inside installed plugins, and raises red flags (PHP in `uploads`, unverified mu-plugins, core files changed without a version change). Payloads of MBs become a few KB.
+- **Pre-analysis in code** before the AI sees anything: groups events, classifies file changes (`wp_version_upgrade`, `extensions_update`, `few_changes`, `unexplained_mass_change`, `initial_snapshot`), summarizes mass changes per folder, verifies mu-plugins by MD5 against copies shipped inside installed plugins, verifies core files against the **official WordPress checksums** for the site's version (so a core file restored after a compromise reads as a clean-up, and one altered even during an upgrade is caught), and raises red flags (PHP in `uploads`, unverified mu-plugins, altered or foreign core files). Payloads of MBs become a few KB.
 - Calls any OpenAI-compatible Chat Completions endpoint: local Ollama, a local Claude Code bridge for testing (`npm run bridge`), or a hosted provider.
 - Stores the verdict: `analysis_status` (`legit` / `malicious` / `unknown`), `analysis_certainty` (0–100), `analysis_results` (JSON with description and model), `analyzed_at`.
 - `samples/` holds labelled payloads; `npm run test:samples` checks them end-to-end. `sql/` holds the migration for the analysis columns.
@@ -226,12 +227,40 @@ One `ingestions` row for a SiteWitness report:
 | Ollama (analyzer, local models) | `ollama serve` | http://localhost:11434 |
 | PostgreSQL | Docker container `kleos_postgres` | localhost:5432, database `kleoshq_development` |
 
+### Docker stack
+
+`docker-compose.yml` at the root runs the whole pipeline under the `kleoshq` project, next to (not instead of) the host setup above: different ports, its own databases.
+
+```bash
+docker compose up -d --build     # start
+docker compose logs -f <service> # follow one service
+docker compose down              # stop; add -v to drop the data too
+```
+
+| Service | Container | URL |
+|---|---|---|
+| WordPress 7.1.1 with `wp-sitewitness` active | `kleoshq-wordpress` | http://localhost:8088 (`admin` / `admin_dev_password`) |
+| public-www (`next dev`) | `kleoshq-public-www` | http://localhost:4000 |
+| sitewitness-agent | `kleoshq-sitewitness-agent` | http://localhost:4001/api/ingest/[slug] |
+| woocommerce-agent | `kleoshq-woocommerce-agent` | http://localhost:4002/api/webhooks/woocommerce/[slug] |
+| ingestion-processor | `kleoshq-ingestion-processor` | http://localhost:4003/api/process |
+| ingestion-analyzer | `kleoshq-ingestion-analyzer` | http://localhost:4004/api/analyze |
+| MySQL 8.4 (WordPress) | `kleoshq-mysql` | localhost:3307 |
+| PostgreSQL / TimescaleDB (event store) | `kleoshq-postgres` | localhost:5433, database `kleoshq_development` |
+
+- **Vercel functions** are served by `docker/node/vercel-fn-server.mjs`, a small stand-in for the Vercel runtime (file routing under `api/`, `req.query` / `req.body`, `res.status().json()`), run with `tsx watch`: the subproject folders are bind-mounted, edits reload. No Vercel login needed.
+- **Configuration:** each service still reads its own `.env` / `.env.local` (Supabase keys, `AI_MODEL`, …). Compose overrides only the wiring: database URLs point to `kleoshq-postgres`, `PROCESSOR_URL` and `ANALYZER_URL` to the containers, `AI_API_URL` to the host (`host.docker.internal`, Claude Code bridge by default).
+- **Supabase is not part of the stack:** the agents and the web app use the project configured in their env files.
+- **Event store:** created from `stuff/db/kleoshq_schema_and_reference_20261008.sql` the first time the volume is empty.
+- **WordPress:** `wp-setup` (wp-cli) installs the site and activates SiteWitness on every `up`. Set `SITEWITNESS_SOURCE_ID` and `SITEWITNESS_HMAC_SECRET` in the root `.env` (see `.env.example`) to have it configure the webhook too, then `docker compose up wp-setup`. `wp-storerelay` is mounted but inactive.
+- Send a snapshot without the admin page: `docker compose run --rm --entrypoint wp wp-setup eval 'SW_Sender::run();'`
+
 ### Typical SiteWitness flow
 
 ```bash
 # 1. the agent (or the plugin) inserts a pending ingestion, then:
 cd kleoshq-ingestion-processor && node simulate.mjs <source_id> http://localhost:3000
-# 2. analyze what was processed
+# 2. analyze what was processed (automatic when the processor's ANALYZER_URL is set)
 cd kleoshq-ingestion-analyzer  && node simulate.mjs <source_id> http://localhost:3002
 ```
 
@@ -292,8 +321,8 @@ The packaged plugin builds at the root (`wp-storerelay_*.zip`) are not committed
 
 ## Known gaps and next steps
 
-- **Analyzer trigger:** nothing calls `/api/analyze` automatically yet. The processor could call it after processing, like the agent calls the processor.
-- **Plugin versions:** SiteWitness reports no plugin versions, so the analyzer cannot tell a plugin update from tampered plugin files. With versions, changed files could be checked against the official checksums from wordpress.org (core and free plugins); this is also on the SiteWitness roadmap.
+- **Analyzer in the chain:** the processor calls the analyzer when `ANALYZER_URL` is set. Leave it unset in production until the analyzer has a hosted AI endpoint; locally, point it at `http://localhost:3002/api/analyze`.
+- **Plugin versions:** SiteWitness reports no plugin versions, so the analyzer cannot tell a plugin update from tampered plugin files. Core files are already verified against the official wordpress.org checksums; with plugin versions, free plugins could be verified the same way (wordpress.org publishes per-version plugin checksums). Paid plugins and themes have no official checksums.
 - **Analyzer in production:** local testing uses Ollama or the Claude Code bridge; a deployment needs a hosted AI endpoint and an API key. Check the Vercel plan allows the 300s `maxDuration`.
 - **Outdated subproject docs:** the sitewitness-agent README shows an old `ingestions` schema; the woocommerce-agent README still describes the earlier Express + ngrok setup.
 - **Legacy schema source:** `kleoshq_eventstore_api` still holds the original migrations; the dump in `stuff/db/` is the current reference.

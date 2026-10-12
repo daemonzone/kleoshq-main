@@ -1,0 +1,270 @@
+# ---------------------------------------------------------------------------
+# KleosHQ local stack
+#
+#   docker compose up -d --build        start everything
+#   docker compose logs -f <service>    follow one service
+#   docker compose down                 stop (add -v to also drop the data)
+#
+# Settings and their defaults: .env.example (copy to .env to change them).
+#
+# The Node services run the subproject folders as they are (bind-mounted, hot
+# reload). Each one still loads its own .env / .env.local through dotenv or
+# Next.js, which is where the Supabase keys come from; the variables set here
+# take precedence, so the databases and service URLs below always win over
+# whatever those files point at (Neon, *.vercel.app, localhost).
+# ---------------------------------------------------------------------------
+
+name: kleoshq
+
+# Event store connection string shared by the agents, processor and analyzer.
+#  - host "postgres-localhost": processor and analyzer pick the plain pg driver
+#    (instead of the Neon HTTP driver) only when the URL contains "localhost"
+#  - sslmode=disable: the agents ask for SSL, the local Postgres has none
+x-eventstore-url: &eventstore-url postgresql://${POSTGRES_USER:-kleos}:${POSTGRES_PASSWORD:-kleos_dev_password}@postgres-localhost:5432/${POSTGRES_DB:-kleoshq_development}?sslmode=disable
+
+x-node-service: &node-service
+  image: kleoshq-node-dev
+  build: ./docker/node
+  init: true
+
+x-vercel-function-env: &vercel-function-env
+  NPM_CI_FLAGS: --omit=dev
+
+x-vercel-function-healthcheck: &vercel-function-healthcheck
+  test: ["CMD", "node", "-e", "fetch('http://localhost:3000/').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+  interval: 10s
+  timeout: 5s
+  retries: 5
+  start_period: 120s
+  start_interval: 3s
+
+x-wordpress-db-env: &wordpress-db-env
+  WORDPRESS_DB_HOST: mysql:3306
+  WORDPRESS_DB_NAME: ${MYSQL_DATABASE:-wordpress}
+  WORDPRESS_DB_USER: ${MYSQL_USER:-wordpress}
+  WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD:-wordpress_dev_password}
+  # Loopback requests to localhost:<host port> fail inside the container, so
+  # wp-cron is run from page loads instead; core stays on the pinned version.
+  WORDPRESS_CONFIG_EXTRA: |
+    define('ALTERNATE_WP_CRON', true);
+    define('WP_AUTO_UPDATE_CORE', false);
+
+services:
+
+  # -------------------------------------------------------------------------
+  # WordPress site under test
+  # -------------------------------------------------------------------------
+
+  mysql:
+    image: mysql:8.4
+    container_name: kleoshq-mysql
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-wordpress}
+      MYSQL_USER: ${MYSQL_USER:-wordpress}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-wordpress_dev_password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_dev_password}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    ports:
+      - "${MYSQL_PORT:-3307}:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  wordpress:
+    image: wordpress:7.1.1
+    container_name: kleoshq-wordpress
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      <<: *wordpress-db-env
+    volumes:
+      - wordpress_data:/var/www/html
+      # Plugin repositories, read-only so WordPress can never delete or
+      # overwrite them. wp-storerelay is available but left inactive
+      # (it needs WooCommerce).
+      - ./wp-sitewitness:/var/www/html/wp-content/plugins/wp-sitewitness:ro
+      - ./wp-storerelay:/var/www/html/wp-content/plugins/wp-storerelay:ro
+    ports:
+      - "${WORDPRESS_PORT:-8088}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /var/www/html/wp-includes/version.php && php -r 'exit(@fsockopen(\"localhost\", 80) ? 0 : 1);'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  # Installs WordPress, activates SiteWitness and configures its webhook,
+  # then exits. See docker/wordpress/setup.sh.
+  wp-setup:
+    image: wordpress:cli
+    container_name: kleoshq-wp-setup
+    depends_on:
+      mysql:
+        condition: service_healthy
+      wordpress:
+        condition: service_healthy
+    # Same uid as www-data in the wordpress image
+    user: "33:33"
+    environment:
+      <<: *wordpress-db-env
+      HOME: /tmp
+      WP_URL: http://localhost:${WORDPRESS_PORT:-8088}
+      WP_TITLE: ${WP_TITLE:-KleosHQ test site}
+      WP_ADMIN_USER: ${WP_ADMIN_USER:-admin}
+      WP_ADMIN_PASSWORD: ${WP_ADMIN_PASSWORD:-admin_dev_password}
+      WP_ADMIN_EMAIL: ${WP_ADMIN_EMAIL:-admin@example.com}
+      SITEWITNESS_AGENT_URL: http://sitewitness-agent:3000
+      SITEWITNESS_SOURCE_ID: ${SITEWITNESS_SOURCE_ID:-}
+      SITEWITNESS_HMAC_SECRET: ${SITEWITNESS_HMAC_SECRET:-}
+      SITEWITNESS_SCHEDULE: ${SITEWITNESS_SCHEDULE:-daily}
+    volumes:
+      - wordpress_data:/var/www/html
+      - ./wp-sitewitness:/var/www/html/wp-content/plugins/wp-sitewitness:ro
+      - ./wp-storerelay:/var/www/html/wp-content/plugins/wp-storerelay:ro
+      - ./docker/wordpress/setup.sh:/usr/local/bin/kleoshq-wp-setup:ro
+    entrypoint: ["sh", "/usr/local/bin/kleoshq-wp-setup"]
+    restart: "no"
+
+  # -------------------------------------------------------------------------
+  # Event store (stands in for Neon)
+  # -------------------------------------------------------------------------
+
+  postgres:
+    # Local image e23b2cb12927; never pulled, so "latest" cannot drift
+    image: timescale/timescaledb:latest-pg17
+    pull_policy: never
+    container_name: kleoshq-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-kleos}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kleos_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-kleoshq_development}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Schema + reference rows, applied only when the data volume is empty
+      - ./stuff/db/kleoshq_schema_and_reference_20261008.sql:/docker-entrypoint-initdb.d/900_kleoshq_schema.sql:ro
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    networks:
+      default:
+        aliases:
+          - postgres-localhost
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  # -------------------------------------------------------------------------
+  # Vercel functions, served by docker/node/vercel-fn-server.mjs
+  # -------------------------------------------------------------------------
+
+  # POST /api/ingest/[slug]   <- wp-sitewitness
+  sitewitness-agent:
+    <<: *node-service
+    container_name: kleoshq-sitewitness-agent
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *vercel-function-env
+      DATABASE_URL: *eventstore-url
+      PROCESSOR_URL: http://ingestion-processor:3000/api/process
+    volumes:
+      - ./kleoshq-sitewitness-agent:/app
+      - sitewitness_agent_node_modules:/app/node_modules
+    ports:
+      - "${SITEWITNESS_AGENT_PORT:-4001}:3000"
+    healthcheck: *vercel-function-healthcheck
+
+  # POST /api/webhooks/woocommerce/[slug]   <- wp-storerelay / WooCommerce
+  woocommerce-agent:
+    <<: *node-service
+    container_name: kleoshq-woocommerce-agent
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *vercel-function-env
+      DATABASE_URL: *eventstore-url
+    volumes:
+      - ./kleoshq-woocommerce-agent:/app
+      - woocommerce_agent_node_modules:/app/node_modules
+    ports:
+      - "${WOOCOMMERCE_AGENT_PORT:-4002}:3000"
+    healthcheck: *vercel-function-healthcheck
+
+  # POST /api/process { source_id }
+  ingestion-processor:
+    <<: *node-service
+    container_name: kleoshq-ingestion-processor
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *vercel-function-env
+      NEON_DATABASE_URL: *eventstore-url
+      ANALYZER_URL: http://ingestion-analyzer:3000/api/analyze
+    volumes:
+      - ./kleoshq-ingestion-processor:/app
+      - ingestion_processor_node_modules:/app/node_modules
+    ports:
+      - "${INGESTION_PROCESSOR_PORT:-4003}:3000"
+    healthcheck: *vercel-function-healthcheck
+
+  # POST /api/analyze { source_id }
+  ingestion-analyzer:
+    <<: *node-service
+    container_name: kleoshq-ingestion-analyzer
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *vercel-function-env
+      NEON_DATABASE_URL: *eventstore-url
+      # The AI endpoint runs on the host (Claude Code bridge :11435, Ollama
+      # :11434). AI_MODEL and the other AI_* settings stay in the project's .env
+      AI_API_URL: ${AI_API_URL:-http://host.docker.internal:11435/v1/chat/completions}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./kleoshq-ingestion-analyzer:/app
+      - ingestion_analyzer_node_modules:/app/node_modules
+    ports:
+      - "${INGESTION_ANALYZER_PORT:-4004}:3000"
+    healthcheck: *vercel-function-healthcheck
+
+  # -------------------------------------------------------------------------
+  # Web app (Next.js dev server; Supabase keys from its .env.local)
+  # -------------------------------------------------------------------------
+
+  public-www:
+    <<: *node-service
+    container_name: kleoshq-public-www
+    command: ["npx", "next", "dev", "--hostname", "0.0.0.0", "--port", "3000"]
+    environment:
+      NEXT_PUBLIC_SITE_URL: http://localhost:${PUBLIC_WWW_PORT:-4000}
+      NEXT_TELEMETRY_DISABLED: "1"
+    volumes:
+      - ./kleoshq-public-www:/app
+      - public_www_node_modules:/app/node_modules
+      # Keeps the container's build cache apart from a `npm run dev` on the host
+      - public_www_next:/app/.next
+    ports:
+      - "${PUBLIC_WWW_PORT:-4000}:3000"
+
+volumes:
+  mysql_data:
+  wordpress_data:
+  postgres_data:
+  sitewitness_agent_node_modules:
+  woocommerce_agent_node_modules:
+  ingestion_processor_node_modules:
+  ingestion_analyzer_node_modules:
+  public_www_node_modules:
+  public_www_next:
