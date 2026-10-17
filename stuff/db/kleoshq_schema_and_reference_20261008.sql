@@ -172,6 +172,7 @@ CREATE TABLE public.ingestions (
     payload text NOT NULL,
     status character varying DEFAULT 'pending'::character varying NOT NULL,
     source_id uuid,
+    report_id uuid,
     errors jsonb DEFAULT '{}'::jsonb NOT NULL,
     results jsonb DEFAULT '{}'::jsonb NOT NULL,
     analyzed_at timestamp with time zone,

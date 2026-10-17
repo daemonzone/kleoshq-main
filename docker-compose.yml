@@ -210,6 +210,17 @@ services:
       <<: *vercel-function-env
       NEON_DATABASE_URL: *eventstore-url
       ANALYZER_URL: http://ingestion-analyzer:3000/api/analyze
+      # Changed-files archive -> Cloudflare R2 (real, over the internet). Set
+      # these in the root .env; leave blank to disable archiving. The processor
+      # presigns PUTs and the WordPress container uploads straight to R2.
+      # The report's site_url is localhost:<host port> here (unreachable from
+      # this container), so the collect callback points at the wordpress service.
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      R2_REGION: ${R2_REGION:-auto}
+      R2_BUCKET: ${R2_BUCKET:-sitewitness-archives}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      SITEWITNESS_COLLECT_BASE_URL: http://wordpress
     volumes:
       - ./kleoshq-ingestion-processor:/app
       - ingestion_processor_node_modules:/app/node_modules
@@ -230,6 +241,13 @@ services:
       # The AI endpoint runs on the host (Claude Code bridge :11435, Ollama
       # :11434). AI_MODEL and the other AI_* settings stay in the project's .env
       AI_API_URL: ${AI_API_URL:-http://host.docker.internal:11435/v1/chat/completions}
+      # Cloudflare R2 (read): download <report_id>.zip for file-content analysis.
+      # Same bucket the processor writes; blank = code inspection disabled.
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      R2_REGION: ${R2_REGION:-auto}
+      R2_BUCKET: ${R2_BUCKET:-sitewitness-archives}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
