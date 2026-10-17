@@ -97,7 +97,7 @@ Each subproject has its own README with full details; the sections below summari
 
 ### wp-sitewitness
 
-WordPress plugin, *"silent integrity monitoring for WordPress"* (v0.2.1).
+WordPress plugin, *"silent integrity monitoring for WordPress"* (v0.3.2).
 
 - MD5-hashes PHP, JS and HTML files across `wp-admin`, `wp-includes`, plugins, themes and mu-plugins, incrementally (mtime-based).
 - DB checks: admin users, active plugins, mu-plugins, critical options, Elementor snippets, suspicious and recently created users.
@@ -332,6 +332,7 @@ The packaged plugin builds at the root (`wp-storerelay_*.zip`) are not committed
 ## Security notes
 
 - Every webhook is signed with HMAC-SHA256 over the raw body; secrets live in Supabase `sources.hmac` and in each plugin's settings.
+- Changed-file collection never ships credential files: the plugin's `/collect` and the analyzer's file selection both deny `wp-config.php` (and variants/backups) and `.env` files, so their contents are never archived to R2 or sent to the AI (they are still md5-hashed for integrity). R2 credentials never reach the WordPress plugin — it only receives short-lived presigned PUT URLs.
 - `.env` files are never committed (root and subproject `.gitignore`s).
 - `stuff/procs/db_restore.txt` contains live database credentials and is git-ignored; keep it that way, and rotate the password if the file was ever shared.
 - `stuff/*.sql.zip` full dumps contain real customer data (file inventories, admin users and emails) and are git-ignored.
