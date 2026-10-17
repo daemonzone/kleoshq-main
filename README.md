@@ -36,23 +36,23 @@ WordPress site
 kleoshq-sitewitness-agent              POST /api/ingest/[slug]
   - looks up the source in Supabase (sources.id = slug, enabled), verifies the HMAC
   - dedupes on slug + payload hash
-  - INSERT ingestions (status 'pending', report_id) + ingestions_log
+  - INSERT ingestions (status 'pending') + ingestions_log
         │  POST { source_id }
         ▼
 kleoshq-ingestion-processor            POST /api/process
   - diffs each pending report against the previous processed one
-  - writes a wp.events patch to ingestions.results, status 'processed'
-    (or deletes the row when nothing changed)
+  - inserts a scan_reports row (wp.events patch in results, DB-assigned uuidv7 id),
+    marks the ingestion 'processed' (or deletes it when nothing changed)
   - on changed files: calls the plugin's /collect with a presigned R2 PUT URL
-    ──▶ the plugin archives the changed files to R2 as <report_id>.zip
+    ──▶ the plugin archives the changed files to R2 as <scan_report id>.zip
         │  POST { source_id }    in the background, when ANALYZER_URL is set
         ▼
 kleoshq-ingestion-analyzer             POST /api/analyze
-  - pre-analyzes every processed, not-yet-analyzed row in code
-  - downloads <report_id>.zip from R2 and inspects the unverified files' code
+  - pre-analyzes every not-yet-analyzed scan_report in code
+  - downloads <scan_report id>.zip from R2 and inspects the unverified files' code
   - asks an AI for a verdict: legit | malicious | unknown + certainty + description
     + code_inspection (per-file + cross-file)
-  - writes analyzed_at, analysis_results, analysis_status, analysis_certainty
+  - writes analyzed_at, analysis_results, analysis_status, analysis_certainty on the scan_report
 ```
 
 Changed files are captured directly from the live site into object storage (Cloudflare R2) so the analyzer can read their actual code, not just hashes. See each subproject's README for the collect/inspect details.
@@ -102,8 +102,8 @@ WordPress plugin, *"silent integrity monitoring for WordPress"* (v0.2.1).
 - MD5-hashes PHP, JS and HTML files across `wp-admin`, `wp-includes`, plugins, themes and mu-plugins, incrementally (mtime-based).
 - DB checks: admin users, active plugins, mu-plugins, critical options, Elementor snippets, suspicious and recently created users.
 - Keeps 7 days of JSON snapshots in `wp-content/sitewitness-data/` (protected by `.htaccess`).
-- POSTs the report to the configured webhook with `X-SiteWitness-Signature: sha256=<HMAC>` and `X-SiteWitness-Host`. Each report carries a `report_id` (uuid) and a single-use `pull_nonce`.
-- Exposes `POST /wp-json/sitewitness/v1/collect` (nonce-authenticated): on request it archives a given list of changed files to a presigned R2/S3 URL as `<report_id>.zip` — the plugin holds no cloud credentials.
+- POSTs the report to the configured webhook with `X-SiteWitness-Signature: sha256=<HMAC>` and `X-SiteWitness-Host`. Each report carries a single-use `pull_nonce`.
+- Exposes `POST /wp-json/sitewitness/v1/collect` (nonce-authenticated): on request it archives a given list of changed files to a presigned R2/S3 URL under a caller-supplied key (`<scan_report id>.zip`) — the plugin holds no cloud credentials.
 - Configured in *Settings → SiteWitness*: webhook URL, secret, frequency (default daily), "Run snapshot now".
 
 ### wp-storerelay
@@ -120,7 +120,7 @@ WordPress plugin for WooCommerce (v1.0.2). Streams events to an external event s
 Vercel Function receiving SiteWitness reports: `POST /api/ingest/[slug]`.
 
 1. Looks up the source in Supabase (`sources.id = slug`, `enabled = true`) and verifies the HMAC with its `hmac` secret.
-2. Builds the idempotency key `slug-<payload hash>` and inserts into `ingestions` (`ON CONFLICT DO NOTHING`, duplicates answer `{ ok: true, duplicate: true }`), extracting the report's `report_id` into its own column, plus a row in `ingestions_log` with the same id.
+2. Builds the idempotency key `slug-<payload hash>` and inserts into `ingestions` (`ON CONFLICT DO NOTHING`, duplicates answer `{ ok: true, duplicate: true }`), plus a row in `ingestions_log` with the same id.
 3. Fires `POST PROCESSOR_URL { source_id }` to start the processor.
 
 Env: `DATABASE_URL` (Neon), `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `PROCESSOR_URL`.
@@ -141,8 +141,8 @@ Vercel Function: `POST /api/process { source_id }`.
 
 - Takes every `pending` `sitewitness_report` of the source, oldest first; marks it `processing`.
 - First report of a source: a single `snapshot.initial` event with the full site state. Later reports: a diff against the last `processed` one, as `wp.events` (`plugin.added/removed`, `mu_plugin.*`, `wp_version.changed`, `admin_user.*`, `suspicious_user.detected`, `critical_option.changed`, `elementor_snippet.*`, `file.added/removed/modified`).
-- Stores the patch in `results` and marks the row `processed`; deletes rows whose diff is empty; marks `failed` with details in `errors` on error.
-- On a non-empty diff with `file.added`/`file.modified` events and R2 configured: mints a presigned PUT URL (`lib/r2.ts`, dependency-free SigV4) and calls the plugin's `/collect` so the changed files are archived to R2 as `<report_id>.zip` while the report is fresh. Collection never fails processing — errors are only logged.
+- On a non-empty diff: inserts a `scan_reports` row (the patch in `results`, DB-assigned uuidv7 `id`) and marks the ingestion `processed`. Deletes ingestions whose diff is empty; marks `failed` with details in `errors` on error.
+- On a non-empty diff with `file.added`/`file.modified` events and R2 configured: mints a presigned PUT URL (`lib/r2.ts`, dependency-free SigV4) and calls the plugin's `/collect` so the changed files are archived to R2 as `<scan_report id>.zip` while the report is fresh. Collection never fails processing — errors are only logged.
 - When a run leaves at least one row `processed` and `ANALYZER_URL` is set, calls the analyzer for the source in the background (`waitUntil`), so the agent never waits for the AI.
 - Uses `pg` for a localhost DB, the Neon serverless driver otherwise. `node simulate.mjs <source_id>` triggers it locally.
 
@@ -154,10 +154,10 @@ Vercel Function: `POST /api/analyze { source_id }` (optional `Authorization: Bea
 
 - Analyzes every `processed` `sitewitness_report` of the source with `analyzed_at IS NULL`, oldest first, within a time budget (`ANALYZE_TIME_BUDGET_MS`, 240s; `maxDuration` 300s). Failed rows stay unanalyzed and are retried on the next call.
 - **Pre-analysis in code** before the AI sees anything: groups events, classifies file changes (`wp_version_upgrade`, `extensions_update`, `few_changes`, `unexplained_mass_change`, `initial_snapshot`), summarizes mass changes per folder, verifies mu-plugins by MD5 against copies shipped inside installed plugins, verifies core files against the **official WordPress checksums** for the site's version (so a core file restored after a compromise reads as a clean-up, and one altered even during an upgrade is caught), and raises red flags (PHP in `uploads`, unverified mu-plugins, altered or foreign core files). Payloads of MBs become a few KB.
-- **File-content inspection:** when files changed and R2 is set, downloads `<report_id>.zip`, selects the files not already proven genuine (plugin/theme code, uploads, altered/foreign core, unverified mu-plugins), and folds their actual contents into the **same** AI call (untrusted-data guarded). This closes the name-only plugin-directory gap.
+- **File-content inspection:** when files changed and R2 is set, downloads `<scan_report id>.zip`, selects the files not already proven genuine (plugin/theme code, uploads, altered/foreign core, unverified mu-plugins), and folds their actual contents into the **same** AI call (untrusted-data guarded). This closes the name-only plugin-directory gap.
 - Calls any OpenAI-compatible Chat Completions endpoint: local Ollama, a local Claude Code bridge for testing (`npm run bridge`), or a hosted provider.
-- Stores the verdict: `analysis_status` (`legit` / `malicious` / `unknown`), `analysis_certainty` (0–100), `analysis_results` (JSON with description, `code_inspection` and model), `analyzed_at`.
-- `samples/` holds labelled payloads; `npm run test:samples` checks them end-to-end. `sql/` holds the migration for the analysis columns.
+- Stores the verdict on the `scan_reports` row: `analysis_status` (`legit` / `malicious` / `unknown`), `analysis_certainty` (0–100), `analysis_results` (JSON with description, `code_inspection` and model), `analyzed_at`.
+- `samples/` holds labelled payloads; `npm run test:samples` checks them end-to-end.
 
 Env: `NEON_DATABASE_URL`, `AI_API_URL`, `AI_API_KEY`, `AI_MODEL`, plus optional `WEBHOOK_SECRET`, `AI_TIMEOUT_MS`, `AI_MAX_PAYLOAD_CHARS`, `AI_JSON_MODE`, `MASS_FILE_CHANGE_THRESHOLD`, `ANALYZE_TIME_BUDGET_MS`, the `R2_*` set + `AI_MAX_FILE_BYTES` / `AI_MAX_FILE_CONTENT_CHARS` (file-content inspection), `LOG_LEVEL`.
 
@@ -176,7 +176,7 @@ Env (`.env.local`): `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABL
 
 Rails 8.1 / Ruby 3.4.9 API, the original design of an event-driven notification platform (sources, events, subscriptions, notification delivery, Devise JWT auth, Solid Queue, Kamal).
 
-**It is no longer used at runtime.** It was only used to define the Neon schema through its migrations (`db/migrate`). Its `db/schema.rb` is out of date: the live schema has since gained `ingestions.status`, `results`, `errors`, the analysis columns, `ingestions_log` and `v_ingestions`, and `ingestions.source_id` is now a `uuid`. The current reference schema is the dump in `stuff/db/`.
+**It is no longer used at runtime.** It was only used to define the Neon schema through its migrations (`db/migrate`). Its `db/schema.rb` is out of date: the live schema has since gained `ingestions.status`/`errors`, the `scan_reports` table (the wp.events diff + the AI verdict), `ingestions_log` and `v_ingestions`, and `ingestions.source_id` is now a `uuid`. The current reference schema is the dump in `stuff/db/`.
 
 ---
 
@@ -194,7 +194,8 @@ Rails 8.1 / Ruby 3.4.9 API, the original design of an event-driven notification 
 
 | Object | Written by | Content |
 |---|---|---|
-| `ingestions` | sitewitness-agent, processor, analyzer | raw reports (`payload`), `report_id` (uuid, names the R2 archive), processing `status`, `results` (wp.events), `errors`, analysis columns |
+| `ingestions` | sitewitness-agent, processor | raw intake: `payload`, processing `status`, `errors` |
+| `scan_reports` | processor, analyzer | one per processed report: `id` (uuidv7, names the R2 archive), `results` (wp.events diff), and the AI verdict (`analysis_status`/`_certainty`/`_results`, `analyzed_at`) |
 | `ingestions_log` | sitewitness-agent | ingestion runs log, same ids as `ingestions` |
 | `v_ingestions` | view | `ingestions` without the heavy `payload` |
 | `events` | woocommerce-agent | store events with aggregate type/id and JSONB payload |
@@ -210,7 +211,7 @@ The local database runs the `timescale/timescaledb:latest-pg17` image and has th
 
 | Object | Written by | Read by | Content |
 |---|---|---|---|
-| `<report_id>.zip` | wp-sitewitness (via a presigned PUT the processor mints) | ingestion-analyzer (presigned GET) | the files that changed in that report, directory structure preserved (`.tar.gz` when the plugin lacks `ZipArchive`) |
+| `<scan_report id>.zip` | wp-sitewitness (via a presigned PUT the processor mints) | ingestion-analyzer (presigned GET) | the files that changed in that report, directory structure preserved (`.tar.gz` when the plugin lacks `ZipArchive`) |
 
 S3-compatible; the processor and analyzer share the `R2_*` env (`R2_ENDPOINT`, `R2_REGION=auto`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`). Leave them unset to run the pipeline without file collection/inspection (hash diffing still works). The WordPress plugin itself never holds R2 credentials — it only receives short-lived presigned URLs.
 
@@ -218,17 +219,17 @@ S3-compatible; the processor and analyzer share the `R2_*` env (`R2_ENDPOINT`, `
 
 ## Ingestion lifecycle
 
-One `ingestions` row for a SiteWitness report:
+A SiteWitness report across `ingestions` and `scan_reports`:
 
-| Step | Service | Row state |
+| Step | Service | State |
 |---|---|---|
-| received | sitewitness-agent | `status = 'pending'`, `payload` = full report, `report_id` set |
-| processing | processor | `status = 'processing'` |
-| changes found | processor | `status = 'processed'`, `results` = wp.events patch |
-| files archived | processor → plugin | changed files uploaded to R2 as `<report_id>.zip` (when files changed + R2 set) |
-| nothing changed | processor | row deleted |
-| error | processor | `status = 'failed'`, `errors` = message and stack |
-| analyzed | analyzer | `analyzed_at` set; `analysis_status`, `analysis_certainty`, `analysis_results` (incl. `code_inspection`) filled (status and certainty stay NULL for empty results) |
+| received | sitewitness-agent | `ingestions`: `status = 'pending'`, `payload` = full report |
+| processing | processor | `ingestions`: `status = 'processing'` |
+| changes found | processor | new `scan_reports` row (`results` = wp.events patch); `ingestions.status = 'processed'` |
+| files archived | processor → plugin | changed files uploaded to R2 as `<scan_report id>.zip` (when files changed + R2 set) |
+| nothing changed | processor | ingestion deleted, no `scan_reports` row |
+| error | processor | `ingestions`: `status = 'failed'`, `errors` = message and stack |
+| analyzed | analyzer | `scan_reports`: `analyzed_at` set; `analysis_status`, `analysis_certainty`, `analysis_results` (incl. `code_inspection`) filled (status/certainty stay NULL for empty results) |
 
 ---
 
@@ -291,7 +292,7 @@ Each Node service reads its own `.env` (copy it from the project's `env.sample`)
 
 ## Database setup on a new environment
 
-`stuff/db/kleoshq_schema_and_reference_20261008.sql` recreates the Neon database: the full `public` schema (tables, sequences, indexes, constraints, `v_ingestions`, analysis columns) plus reference rows (`sources`, `schema_migrations`, `ar_internal_metadata`, `events_projection_checkpoints`). It contains no ingestion or event data and does not require TimescaleDB.
+`stuff/db/kleoshq_schema_and_reference_20261008.sql` recreates the Neon database: the full `public` schema (tables incl. `scan_reports`, the `uuidv7()` function, sequences, indexes, constraints, `v_ingestions`) plus reference rows (`sources`, `schema_migrations`, `ar_internal_metadata`, `events_projection_checkpoints`). It contains no ingestion or event data and does not require TimescaleDB.
 
 ```bash
 # restore into an EMPTY database
@@ -305,7 +306,7 @@ Then set the real webhook secret (the dump stores `CHANGE_ME`):
 UPDATE public.sources SET webhook_secret = '<secret>' WHERE slug = '<slug>';
 ```
 
-The dump already includes `ingestions.report_id`. On a database created from an **older** dump, add it with [`stuff/db/migrations/0001_ingestions_report_id.sql`](stuff/db/migrations/0001_ingestions_report_id.sql) (safe to re-run) — the sitewitness-agent's insert fails without it. Other schema changes made after the dump live in each service's own `sql/` folder (for example `kleoshq-ingestion-analyzer/sql/`).
+The dump reflects the current `scan_reports` model. A database created from an **older** dump is upgraded with the migrations in [`stuff/db/migrations/`](stuff/db/migrations/): run `0002_create_scan_reports_and_backfill.sql` (additive — creates `scan_reports`, backfills from the old `ingestions` columns) then `0003_drop_analysis_columns_from_ingestions.sql` (drops `results`/analysis columns from `ingestions`; run only once the services are on the new code). Fresh databases from the dump need neither.
 
 ---
 
@@ -344,5 +345,5 @@ The packaged plugin builds at the root (`wp-storerelay_*.zip`) are not committed
 - **Plugin versions:** SiteWitness reports no plugin versions, so the analyzer cannot tell a plugin update from tampered plugin files. Core files are already verified against the official wordpress.org checksums; with plugin versions, free plugins could be verified the same way (wordpress.org publishes per-version plugin checksums). Paid plugins and themes have no official checksums.
 - **Analyzer in production:** local testing uses Ollama or the Claude Code bridge; a deployment needs a hosted AI endpoint and an API key. Check the Vercel plan allows the 300s `maxDuration`.
 - **Changed-file collection auth:** the `/collect` route is authenticated only by the single-use `pull_nonce`. HMAC + timestamp signing (the `agent→site` direction) is the intended next layer before this is exposed beyond a trusted network.
-- **Outdated subproject docs:** the woocommerce-agent README still describes the earlier Express + ngrok setup. (The sitewitness-agent, processor and analyzer READMEs were updated for `report_id` + R2 collection/inspection.)
+- **Outdated subproject docs:** the woocommerce-agent README still describes the earlier Express + ngrok setup. (The SiteWitness plugin, agent, processor and analyzer READMEs, and the schema dump, are current with the `scan_reports` model.)
 - **Legacy schema source:** `kleoshq_eventstore_api` still holds the original migrations; the dump in `stuff/db/` is the current reference.

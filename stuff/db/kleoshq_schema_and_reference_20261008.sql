@@ -172,15 +172,7 @@ CREATE TABLE public.ingestions (
     payload text NOT NULL,
     status character varying DEFAULT 'pending'::character varying NOT NULL,
     source_id uuid,
-    report_id uuid,
-    errors jsonb DEFAULT '{}'::jsonb NOT NULL,
-    results jsonb DEFAULT '{}'::jsonb NOT NULL,
-    analyzed_at timestamp with time zone,
-    analysis_results jsonb DEFAULT '{}'::jsonb NOT NULL,
-    analysis_status character varying,
-    analysis_certainty integer,
-    CONSTRAINT ingestions_analysis_certainty_check CHECK (((analysis_certainty IS NULL) OR ((analysis_certainty >= 0) AND (analysis_certainty <= 100)))),
-    CONSTRAINT ingestions_analysis_status_check CHECK (((analysis_status IS NULL) OR ((analysis_status)::text = ANY ((ARRAY['legit'::character varying, 'malicious'::character varying, 'unknown'::character varying])::text[]))))
+    errors jsonb DEFAULT '{}'::jsonb NOT NULL
 );
 
 
@@ -265,12 +257,7 @@ CREATE VIEW public.v_ingestions AS
     event_type,
     ingested_at,
     status,
-    errors,
-    results,
-    analyzed_at,
-    analysis_status,
-    analysis_certainty,
-    analysis_results
+    errors
    FROM public.ingestions
   ORDER BY id;
 
@@ -479,11 +466,6 @@ CREATE INDEX index_ingestions_on_source_id ON public.ingestions USING btree (sou
 CREATE INDEX index_ingestions_on_source_type_status_ingested_at ON public.ingestions USING btree (source_id, event_type, status, ingested_at);
 
 
---
--- Name: index_ingestions_pending_analysis; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX index_ingestions_pending_analysis ON public.ingestions USING btree (source_id, ingested_at) WHERE ((analyzed_at IS NULL) AND ((status)::text = 'processed'::text) AND ((event_type)::text = 'sitewitness_report'::text));
 
 
 --
@@ -590,3 +572,60 @@ INSERT INTO public.sources (id, active, created_at, name, platform, slug, update
 
 SELECT pg_catalog.setval('public.sources_id_seq', COALESCE((SELECT max(id) FROM public.sources), 1), (SELECT count(*) > 0 FROM public.sources));
 SELECT pg_catalog.setval('public.events_projection_checkpoints_id_seq', COALESCE((SELECT max(id) FROM public.events_projection_checkpoints), 1), (SELECT count(*) > 0 FROM public.events_projection_checkpoints));
+
+
+--
+-- Name: uuidv7(); Type: FUNCTION; Schema: public; Owner: -
+-- Postgres < 18 has no native uuidv7(); time-ordered uuid used for scan_reports.id.
+--
+
+CREATE OR REPLACE FUNCTION public.uuidv7() RETURNS uuid
+    LANGUAGE plpgsql VOLATILE
+    AS $$
+DECLARE
+    v  bytea;
+    ms bigint;
+BEGIN
+    ms := floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint;
+    v  := uuid_send(gen_random_uuid());
+    v  := overlay(v placing substring(int8send(ms) FROM 3 FOR 6) FROM 1 FOR 6);  -- bytes 0..5 = ms
+    v  := set_byte(v, 6, (get_byte(v, 6) & 15) | 112);                           -- version = 7
+    RETURN encode(v, 'hex')::uuid;
+END $$;
+
+
+--
+-- Name: scan_reports; Type: TABLE; Schema: public; Owner: -
+-- One row per processed report: the processor writes `results` (the wp.events
+-- diff) and the analyzer fills the analysis columns. `id` (uuidv7) is the diff's
+-- canonical identifier and the R2 archive key. Loosely linked to its ingestion
+-- (ON DELETE SET NULL) so ingestions can be purged without losing verdicts.
+--
+
+CREATE TABLE public.scan_reports (
+    id uuid DEFAULT public.uuidv7() NOT NULL,
+    ingestion_id bigint,
+    source_id uuid,
+    site_identifier character varying,
+    event_type character varying,
+    results jsonb DEFAULT '{}'::jsonb NOT NULL,
+    analyzed_at timestamp with time zone,
+    analysis_results jsonb DEFAULT '{}'::jsonb NOT NULL,
+    analysis_status character varying,
+    analysis_certainty integer,
+    created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    CONSTRAINT scan_reports_analysis_certainty_check CHECK (((analysis_certainty IS NULL) OR ((analysis_certainty >= 0) AND (analysis_certainty <= 100)))),
+    CONSTRAINT scan_reports_analysis_status_check CHECK (((analysis_status IS NULL) OR ((analysis_status)::text = ANY ((ARRAY['legit'::character varying, 'malicious'::character varying, 'unknown'::character varying])::text[]))))
+);
+
+ALTER TABLE ONLY public.scan_reports
+    ADD CONSTRAINT scan_reports_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY public.scan_reports
+    ADD CONSTRAINT scan_reports_ingestion_id_key UNIQUE (ingestion_id);
+
+ALTER TABLE ONLY public.scan_reports
+    ADD CONSTRAINT scan_reports_ingestion_id_fkey FOREIGN KEY (ingestion_id) REFERENCES public.ingestions(id) ON DELETE SET NULL;
+
+CREATE INDEX scan_reports_source_id_idx ON public.scan_reports USING btree (source_id);
+CREATE INDEX scan_reports_pending_analysis_idx ON public.scan_reports USING btree (source_id, created_at) WHERE (analyzed_at IS NULL);
