@@ -167,8 +167,9 @@ Env: `NEON_DATABASE_URL`, `AI_API_URL`, `AI_API_KEY`, `AI_MODEL`, plus optional 
 
 Next.js 16 (App Router) web app with React 19, Tailwind 4 and Supabase Auth. Note: Next.js 16 has breaking changes; see the project's `AGENTS.md`.
 
-- Pages: home, login (+ auth callback), dashboard, sources list and detail, profile. `proxy.ts` protects `/dashboard`, `/sources`, `/profile`.
-- Server actions for auth, websites, channels and sources. Auth goes through Supabase; all app data goes through `lib/db.ts` to Neon.
+- Pages: home, login (+ auth callback), dashboard (multiple websites, each with aggregate status), per-website services (`/sources?website=<id>`) and service detail, incident detail (`/incidents/<id>`), profile. `proxy.ts` protects `/dashboard`, `/sources`, `/incidents`, `/profile`.
+- Server actions for auth, websites, channels, sources and incidents. Auth goes through Supabase; all app data goes through `lib/db.ts` to Neon.
+- **Incidents:** from a malicious/sospetto scan a user opens an incident; the analyzer (`POST /api/remediation`, via `ANALYZER_URL`) generates a summary + remediation steps; closing it parks the service in `awaiting_verification` (unless already healthy) until the next scan. An incident from a sospetto report is deletable, a malicious one is not.
 - `lib/db.ts` (server-only) is the only module that touches the database; it connects with the owner connection string (like the other services). Tenant isolation is enforced in the queries: `withUser(userId, fn)` runs each action in a transaction, every statement filters on `user_id`, and a source can only point at one of the user's own websites.
 - The channel catalogue is seeded by `stuff/db/migrations/0004_app_tables_from_supabase.sql` (WooCommerce, SiteWitness, Shopify enabled; Magento, PrestaShop, Custom planned). `supabase/schema.sql` / `seed_channels.sql` are kept for reference only — those Supabase tables are being retired.
 
@@ -194,7 +195,8 @@ User accounts (`auth.users`), sign-in, password reset. `websites.user_id` / `sou
 |---|---|---|
 | `channels` | migration 0004 (seed) | integration types (`woocommerce`, `sitewitness`, `shopify`, …) with their public webhook URL; read-only for the web app |
 | `websites` | web app | websites registered by a user (scoped to `user_id` by the app) |
-| `sources` | web app, analyzer (`status`) | one per website and channel: `id` (uuid, the `[slug]` in the agent URLs), `hmac` secret, `enabled`, `status` (`healthy`/`warning`/`compromised`/`not scanned yet`); scoped to `user_id` by the app; read by the agents |
+| `sources` | web app, analyzer (`status`) | one per website and channel: `id` (uuid, the `[slug]` in the agent URLs), `hmac` secret, `enabled`, `status` (`healthy`/`warning`/`compromised`/`not scanned yet`/`awaiting_verification`); scoped to `user_id` by the app; read by the agents |
+| `incidents`, `incident_remediation_steps` | web app | an incident opened from a malicious/sospetto scan, with the analyzer-generated remediation steps (migration `0006`) |
 | `ingestions` | sitewitness-agent, processor | raw intake: `payload`, processing `status`, `errors` |
 | `scan_reports` | processor, analyzer | one per processed report: `id` (uuidv7, names the R2 archive), `results` (wp.events diff), and the AI verdict (`analysis_status`/`_certainty`/`_results`, `analyzed_at`) |
 | `ingestions_log` | sitewitness-agent | ingestion runs log, same ids as `ingestions` |
