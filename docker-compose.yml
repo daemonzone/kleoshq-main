@@ -337,6 +337,11 @@ services:
       # The AI endpoint runs on the host (Claude Code bridge :11435, Ollama
       # :11434). AI_MODEL and the other AI_* settings stay in the project's .env
       AI_API_URL: ${AI_API_URL:-http://host.docker.internal:11435/v1/chat/completions}
+      # File-content inspection budget. Defaults (24k/64k) are sized for small
+      # local models; with a large-context model (Claude/sonnet) raise them so
+      # more/larger changed files are inspected in one call instead of omitted.
+      AI_MAX_FILE_CONTENT_CHARS: ${AI_MAX_FILE_CONTENT_CHARS:-150000}
+      AI_MAX_FILE_BYTES: ${AI_MAX_FILE_BYTES:-131072}
       # Cloudflare R2 (read): download <report_id>.zip for file-content analysis.
       # Same bucket the processor writes; blank = code inspection disabled.
       R2_ENDPOINT: ${R2_ENDPOINT:-}
