@@ -6,13 +6,15 @@
 -- Contains
 --   - full public schema: tables, sequences, indexes, constraints, v_ingestions
 --     (including the analyzer columns from kleoshq-ingestion-analyzer/sql/)
---   - reference rows: sources, schema_migrations, ar_internal_metadata,
+--   - reference rows: channels, schema_migrations, ar_internal_metadata,
 --     events_projection_checkpoints
+--   - the app tables moved from Supabase (channels, websites, sources) with
 -- Does NOT contain
---   - ingestions, ingestions_log, events, events_processed_keys rows
---   - real webhook secrets: sources.webhook_secret is set to 'CHANGE_ME';
---     set the real value per environment (it must match the agent's config):
---       UPDATE public.sources SET webhook_secret = '<secret>' WHERE slug = 'pattyboop';
+--   - ingestions, ingestions_log, events, events_processed_keys, scan_reports rows
+--   - websites / sources rows (they hold user data and HMAC secrets): copy them
+--     with stuff/db/scripts/export_supabase_app_tables.mjs or create them in the app
+--   - login roles: create the web app's login role per environment (locally:
+--     stuff/db/local/create_web_role.sql, mounted by docker-compose)
 --   - owners / grants (--no-owner --no-acl): objects belong to the restoring user
 --
 -- TimescaleDB is installed on the local DB but no table is a hypertable, so the
@@ -219,34 +221,6 @@ CREATE TABLE public.schema_migrations (
 
 
 --
--- Name: sources_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.sources_id_seq
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: sources; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.sources (
-    id bigint DEFAULT nextval('public.sources_id_seq'::regclass) NOT NULL,
-    active boolean DEFAULT true NOT NULL,
-    created_at timestamp without time zone NOT NULL,
-    name character varying NOT NULL,
-    platform character varying NOT NULL,
-    slug character varying NOT NULL,
-    updated_at timestamp without time zone NOT NULL,
-    webhook_secret character varying NOT NULL
-);
-
-
---
 -- Name: v_ingestions; Type: VIEW; Schema: public; Owner: -
 --
 
@@ -323,14 +297,6 @@ ALTER TABLE ONLY public.ingestions
 
 ALTER TABLE ONLY public.schema_migrations
     ADD CONSTRAINT schema_migrations_pkey PRIMARY KEY (version);
-
-
---
--- Name: sources sources_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.sources
-    ADD CONSTRAINT sources_pkey PRIMARY KEY (id);
 
 
 --
@@ -469,27 +435,6 @@ CREATE INDEX index_ingestions_on_source_type_status_ingested_at ON public.ingest
 
 
 --
--- Name: index_sources_on_active; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX index_sources_on_active ON public.sources USING btree (active);
-
-
---
--- Name: index_sources_on_platform; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX index_sources_on_platform ON public.sources USING btree (platform);
-
-
---
--- Name: index_sources_on_slug; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX index_sources_on_slug ON public.sources USING btree (slug);
-
-
---
 -- Name: uq_events_processed_keys; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -553,13 +498,6 @@ INSERT INTO public.schema_migrations (version) VALUES ('20260504163616');
 
 
 --
--- Data for Name: sources; Type: TABLE DATA; Schema: public; Owner: -
---
-
-INSERT INTO public.sources (id, active, created_at, name, platform, slug, updated_at, webhook_secret) VALUES (1, true, '2026-04-29 12:35:33.320553', 'PattyBoop Fashion Store', 'woocommerce', 'pattyboop', '2026-04-29 12:35:33.320553', 'CHANGE_ME');
-
-
---
 -- PostgreSQL database dump complete
 --
 
@@ -570,7 +508,6 @@ INSERT INTO public.sources (id, active, created_at, name, platform, slug, update
 -- Sequences of the reference tables: continue after the restored rows
 --
 
-SELECT pg_catalog.setval('public.sources_id_seq', COALESCE((SELECT max(id) FROM public.sources), 1), (SELECT count(*) > 0 FROM public.sources));
 SELECT pg_catalog.setval('public.events_projection_checkpoints_id_seq', COALESCE((SELECT max(id) FROM public.events_projection_checkpoints), 1), (SELECT count(*) > 0 FROM public.events_projection_checkpoints));
 
 
@@ -629,3 +566,70 @@ ALTER TABLE ONLY public.scan_reports
 
 CREATE INDEX scan_reports_source_id_idx ON public.scan_reports USING btree (source_id);
 CREATE INDEX scan_reports_pending_analysis_idx ON public.scan_reports USING btree (source_id, created_at) WHERE (analyzed_at IS NULL);
+
+
+--
+-- App tables moved from Supabase (same as migrations/0004_app_tables_from_supabase.sql)
+--
+
+-- ---------------------------------------------------------------------------
+-- channels (managed by us, read-only for users)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.channels (
+    id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    code        text NOT NULL UNIQUE,
+    name        text NOT NULL,
+    icon        text NOT NULL DEFAULT '',
+    webhook_url text NOT NULL DEFAULT '',
+    description text NOT NULL DEFAULT '',
+    enabled     boolean NOT NULL DEFAULT true,
+    created_at  timestamptz NOT NULL DEFAULT now()
+);
+
+-- ---------------------------------------------------------------------------
+-- websites (one per user for now)
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.websites (
+    id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id    uuid NOT NULL,                 -- Supabase Auth user id
+    name       text NOT NULL,
+    url        text NOT NULL,
+    slug       text NOT NULL,
+    enabled    boolean NOT NULL DEFAULT true,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT websites_url_unique  UNIQUE (url),
+    CONSTRAINT websites_slug_unique UNIQUE (slug)
+);
+CREATE INDEX IF NOT EXISTS websites_user_id_idx ON public.websites (user_id);
+
+-- ---------------------------------------------------------------------------
+-- sources (one per website and channel); `id` is the [slug] in the agent URLs
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.sources (
+    id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id           uuid NOT NULL,          -- Supabase Auth user id
+    website_id        uuid REFERENCES public.websites(id) ON DELETE SET NULL,
+    channel_code      text NOT NULL REFERENCES public.channels(code) ON DELETE RESTRICT,
+    name              text NOT NULL,
+    hmac              text NOT NULL,
+    enabled           boolean NOT NULL DEFAULT true,
+    status            text NOT NULL DEFAULT 'not scanned yet',
+    status_changed_at timestamptz NOT NULL DEFAULT now(),
+    created_at        timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT sources_website_channel_unique UNIQUE (website_id, channel_code),
+    CONSTRAINT sources_status_check
+        CHECK (status IN ('healthy', 'warning', 'compromised', 'not scanned yet'))
+);
+CREATE INDEX IF NOT EXISTS sources_user_id_idx ON public.sources (user_id);
+
+-- ---------------------------------------------------------------------------
+-- Channel catalogue (same rows as kleoshq-public-www/supabase/seed_channels.sql)
+-- ---------------------------------------------------------------------------
+INSERT INTO public.channels (code, name, icon, webhook_url, description, enabled) VALUES
+  ('woocommerce', 'WooCommerce', '🛒', 'https://hooks.kleoshq.com/woocommerce', 'Ricevi eventi da negozi WooCommerce: ordini, carrelli abbandonati, aggiornamenti prodotti.',          true),
+  ('sitewitness', 'SiteWitness', '👁️', 'https://hooks.kleoshq.com/sitewitness', 'Monitora il comportamento degli utenti sul tuo sito: sessioni, click, scroll e conversioni.',       true),
+  ('shopify',     'Shopify',     '🏪', 'https://hooks.kleoshq.com/shopify',     'Integra negozi Shopify per ricevere notifiche su ordini, clienti e aggiornamenti inventario.',       true),
+  ('magento',     'Magento',     '🔶', 'https://hooks.kleoshq.com/magento',     'Connetti store Magento per sincronizzare ordini, catalogo prodotti e dati clienti.',                 false),
+  ('prestashop',  'PrestaShop',  '🐾', 'https://hooks.kleoshq.com/prestashop',  'Ricevi dati da negozi PrestaShop: ordini, prodotti e aggiornamenti del catalogo in tempo reale.',   false),
+  ('custom',      'Custom',      '⚙️', 'https://hooks.kleoshq.com/custom',      'Integrazione personalizzata via webhook generico — compatibile con qualsiasi piattaforma o CMS.',   false)
+ON CONFLICT (code) DO NOTHING;

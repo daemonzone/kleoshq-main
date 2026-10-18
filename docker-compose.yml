@@ -267,9 +267,17 @@ services:
     <<: *node-service
     container_name: kleoshq-public-www
     command: ["npx", "next", "dev", "--hostname", "0.0.0.0", "--port", "3000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       NEXT_PUBLIC_SITE_URL: http://localhost:${PUBLIC_WWW_PORT:-4000}
       NEXT_TELEMETRY_DISABLED: "1"
+      # App data (channels/websites/sources) lives in the event store. The web
+      # App data (channels/websites/sources) lives in the event store; the web
+      # app connects with the owner string like the other services. Supabase
+      # stays for authentication only.
+      DATABASE_URL: *eventstore-url
     volumes:
       - ./kleoshq-public-www:/app
       - public_www_node_modules:/app/node_modules

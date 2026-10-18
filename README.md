@@ -24,7 +24,7 @@ This root folder is a workspace: each subproject is its own git repository. The 
 
 ## Architecture
 
-Two pipelines share one Neon database and one source registry (Supabase).
+Two pipelines share one Neon database, which also holds the source registry (`channels`, `websites`, `sources`). Supabase is used for user authentication only.
 
 ### Site integrity (SiteWitness)
 
@@ -34,7 +34,7 @@ WordPress site
         │  POST, X-SiteWitness-Signature: sha256=HMAC(body)
         ▼
 kleoshq-sitewitness-agent              POST /api/ingest/[slug]
-  - looks up the source in Supabase (sources.id = slug, enabled), verifies the HMAC
+  - looks up the source in Neon (sources.id = slug, enabled), verifies the HMAC
   - dedupes on slug + payload hash
   - INSERT ingestions (status 'pending') + ingestions_log
         │  POST { source_id }
@@ -66,16 +66,17 @@ WooCommerce store
         │       x-wc-webhook-event-type, x-wc-webhook-delivery-id, x-wc-aggregate-type/-id
         ▼
 kleoshq-woocommerce-agent              POST /api/webhooks/woocommerce/[slug]
-  - looks up the source in Supabase, verifies the HMAC
+  - looks up the source in Neon, verifies the HMAC
   - INSERT events + events_processed_keys (idempotency)
 ```
 
 ### Management
 
 ```
-kleoshq-public-www (Next.js + Supabase Auth)
+kleoshq-public-www (Next.js; Supabase Auth for sign-in, Neon for data)
   - users sign in, register websites, create one source per website and channel
   - each source gets the HMAC secret the plugins and agents use
+  - reads/writes Neon with the owner connection (tenant isolation enforced in the queries)
 ```
 
 ---
@@ -90,7 +91,7 @@ kleoshq-public-www (Next.js + Supabase Auth)
 | [`kleoshq-woocommerce-agent`](#kleoshq-woocommerce-agent) | Node.js, Vercel Function | Receives StoreRelay events | Vercel `kleoshq-receiver-nodejs` |
 | [`kleoshq-ingestion-processor`](#kleoshq-ingestion-processor) | TypeScript, Vercel Function | Turns reports into change events | Vercel `kleoshq-ingestion-processor` |
 | [`kleoshq-ingestion-analyzer`](#kleoshq-ingestion-analyzer) | TypeScript, Vercel Function | AI verdict on changes | Vercel `kleoshq-ingestion-analyzer` |
-| [`kleoshq-public-www`](#kleoshq-public-www) | Next.js 16, React 19, Supabase | Web app: websites and sources | Vercel / local |
+| [`kleoshq-public-www`](#kleoshq-public-www) | Next.js 16, React 19, Supabase Auth, Neon | Web app: websites and sources | Vercel / local |
 | [`kleoshq_eventstore_api`](#kleoshq_eventstore_api-legacy) | Ruby on Rails 8.1 | **Legacy**: only used to define DB migrations | not used |
 
 Each subproject has its own README with full details; the sections below summarize them.
@@ -119,21 +120,21 @@ WordPress plugin for WooCommerce (v1.0.2). Streams events to an external event s
 
 Vercel Function receiving SiteWitness reports: `POST /api/ingest/[slug]`.
 
-1. Looks up the source in Supabase (`sources.id = slug`, `enabled = true`) and verifies the HMAC with its `hmac` secret.
+1. Validates the slug is a uuid, looks up the source in Neon (`sources.id = slug`, `enabled = true`) and verifies the HMAC with its `hmac` secret.
 2. Builds the idempotency key `slug-<payload hash>` and inserts into `ingestions` (`ON CONFLICT DO NOTHING`, duplicates answer `{ ok: true, duplicate: true }`), plus a row in `ingestions_log` with the same id.
 3. Fires `POST PROCESSOR_URL { source_id }` to start the processor.
 
-Env: `DATABASE_URL` (Neon), `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `PROCESSOR_URL`.
+Env: `DATABASE_URL` (Neon — ingestions and the source registry), `PROCESSOR_URL`. No Supabase credentials.
 
 ### kleoshq-woocommerce-agent
 
 Vercel Function receiving StoreRelay (and native WooCommerce) webhooks: `POST /api/webhooks/woocommerce/[slug]`.
 
-- Looks up the source in Supabase, verifies `x-wc-webhook-signature`.
+- Looks up the source in Neon, verifies `x-wc-webhook-signature`.
 - Inserts into `events` (with `aggregate_type` / `aggregate_id` from the headers) and `events_processed_keys` for idempotency.
 - `test-webhook.js` and `test-customer-webhook.js` send sample signed requests.
 
-Env: `DATABASE_URL`, `SUPABASE_URL`, `SUPABASE_SECRET_KEY`.
+Env: `DATABASE_URL` (Neon). No Supabase credentials.
 
 ### kleoshq-ingestion-processor
 
@@ -166,11 +167,11 @@ Env: `NEON_DATABASE_URL`, `AI_API_URL`, `AI_API_KEY`, `AI_MODEL`, plus optional 
 Next.js 16 (App Router) web app with React 19, Tailwind 4 and Supabase Auth. Note: Next.js 16 has breaking changes; see the project's `AGENTS.md`.
 
 - Pages: home, login (+ auth callback), dashboard, sources list and detail, profile. `proxy.ts` protects `/dashboard`, `/sources`, `/profile`.
-- Server actions for auth, websites, channels and sources.
-- Supabase schema in `supabase/schema.sql` (`channels`, `websites`, `sources` with row-level security) and `supabase/seed_channels.sql` (WooCommerce, SiteWitness, Shopify enabled; Magento, PrestaShop, Custom planned).
-- The Supabase `sources` table is the **source registry** the agents authenticate against.
+- Server actions for auth, websites, channels and sources. Auth goes through Supabase; all app data goes through `lib/db.ts` to Neon.
+- `lib/db.ts` (server-only) is the only module that touches the database; it connects with the owner connection string (like the other services). Tenant isolation is enforced in the queries: `withUser(userId, fn)` runs each action in a transaction, every statement filters on `user_id`, and a source can only point at one of the user's own websites.
+- The channel catalogue is seeded by `stuff/db/migrations/0004_app_tables_from_supabase.sql` (WooCommerce, SiteWitness, Shopify enabled; Magento, PrestaShop, Custom planned). `supabase/schema.sql` / `seed_channels.sql` are kept for reference only — those Supabase tables are being retired.
 
-Env (`.env.local`): `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`.
+Env (`.env.local`): `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` (auth), `DATABASE_URL` (Neon, owner connection — same as the agents).
 
 ### kleoshq_eventstore_api (legacy)
 
@@ -182,18 +183,17 @@ Rails 8.1 / Ruby 3.4.9 API, the original design of an event-driven notification 
 
 ## Data stores
 
-### Supabase (managed by kleoshq-public-www)
+### Supabase (authentication only)
 
-| Table | Content |
-|---|---|
-| `channels` | integration types (`woocommerce`, `sitewitness`, `shopify`, …) with their public webhook URL |
-| `websites` | websites registered by a user |
-| `sources` | one per website and channel: `id` (uuid, used as `[slug]` in the agent URLs), `hmac` secret, `enabled` |
+User accounts (`auth.users`), sign-in, password reset. `websites.user_id` / `sources.user_id` in Neon hold the Supabase user id (plain uuid, no cross-database foreign key).
 
 ### Neon PostgreSQL (event store)
 
 | Object | Written by | Content |
 |---|---|---|
+| `channels` | migration 0004 (seed) | integration types (`woocommerce`, `sitewitness`, `shopify`, …) with their public webhook URL; read-only for the web app |
+| `websites` | web app | websites registered by a user (scoped to `user_id` by the app) |
+| `sources` | web app, analyzer (`status`) | one per website and channel: `id` (uuid, the `[slug]` in the agent URLs), `hmac` secret, `enabled`, `status` (`healthy`/`warning`/`compromised`/`not scanned yet`); scoped to `user_id` by the app; read by the agents |
 | `ingestions` | sitewitness-agent, processor | raw intake: `payload`, processing `status`, `errors` |
 | `scan_reports` | processor, analyzer | one per processed report: `id` (uuidv7, names the R2 archive), `results` (wp.events diff), and the AI verdict (`analysis_status`/`_certainty`/`_results`, `analyzed_at`) |
 | `ingestions_log` | sitewitness-agent | ingestion runs log, same ids as `ingestions` |
@@ -201,9 +201,9 @@ Rails 8.1 / Ruby 3.4.9 API, the original design of an event-driven notification 
 | `events` | woocommerce-agent | store events with aggregate type/id and JSONB payload |
 | `events_processed_keys` | woocommerce-agent | idempotency keys of processed store events |
 | `events_projection_checkpoints` | (unused so far) | projection positions |
-| `sources`, `schema_migrations`, `ar_internal_metadata` | legacy Rails | not used by the current services |
+| `schema_migrations`, `ar_internal_metadata` | legacy Rails | not used by the current services |
 
-> **Two `sources` tables.** The agents authenticate against **Supabase** `sources` (uuid ids), and `ingestions.source_id` holds that uuid. The Neon `sources` table (bigint ids) is a leftover of the Rails project and is not linked to `ingestions`.
+> **Roles.** Every service — agents, processor, analyzer and the web app — connects with the owner connection string. The web app keeps users to their own rows in code: every query filters on the signed-in user's id (`lib/db.ts`), rather than relying on database row-level security.
 
 The local database runs the `timescale/timescaledb:latest-pg17` image and has the TimescaleDB extension installed, but no table is a hypertable.
 
@@ -268,10 +268,11 @@ docker compose down              # stop; add -v to drop the data too
 | PostgreSQL / TimescaleDB (event store) | `kleoshq-postgres` | localhost:5433, database `kleoshq_development` |
 
 - **Vercel functions** are served by `docker/node/vercel-fn-server.mjs`, a small stand-in for the Vercel runtime (file routing under `api/`, `req.query` / `req.body`, `res.status().json()`), run with `tsx watch`: the subproject folders are bind-mounted, edits reload. No Vercel login needed.
-- **Configuration:** each service still reads its own `.env` / `.env.local` (Supabase keys, `AI_MODEL`, …). Compose overrides only the wiring: database URLs point to `kleoshq-postgres`, `PROCESSOR_URL` and `ANALYZER_URL` to the containers, `AI_API_URL` to the host (`host.docker.internal`, Claude Code bridge by default).
+- **Configuration:** each service still reads its own `.env` / `.env.local` (Supabase auth keys for the web app, `AI_MODEL`, …). Compose overrides only the wiring: database URLs point to `kleoshq-postgres`, `PROCESSOR_URL` and `ANALYZER_URL` to the containers, `AI_API_URL` to the host (`host.docker.internal`, Claude Code bridge by default).
 - **Object storage (R2):** the `R2_*` vars from the root `.env` are passed to the processor and analyzer (real Cloudflare R2, over the internet — there is no local S3 container). The processor also gets `SITEWITNESS_COLLECT_BASE_URL=http://wordpress`, because the report's `site_url` (`localhost:<host port>`) is unreachable from inside the containers. Leave `R2_*` blank to run without changed-file collection/inspection.
-- **Supabase is not part of the stack:** the agents and the web app use the project configured in their env files.
-- **Event store:** created from `stuff/db/kleoshq_schema_and_reference_20261008.sql` the first time the volume is empty.
+- **Supabase is not part of the stack:** only the web app talks to it, for sign-in, using the project in its `.env.local`. The agents no longer use Supabase.
+- **Event store:** created from `stuff/db/kleoshq_schema_and_reference_20261008.sql` the first time the volume is empty. Fill `websites`/`sources` with the export script below, or create them in the app.
+- **Host-run services:** Postgres is published on `localhost:5433`, so a service run outside Docker needs `…@localhost:5433/kleoshq_development` (port 5432 has nothing listening).
 - **WordPress:** `wp-setup` (wp-cli) installs the site and activates SiteWitness on every `up`. Set `SITEWITNESS_SOURCE_ID` and `SITEWITNESS_HMAC_SECRET` in the root `.env` (see `.env.example`) to have it configure the webhook too, then `docker compose up wp-setup`. `wp-storerelay` is mounted but inactive.
 - Send a snapshot without the admin page: `docker compose run --rm --entrypoint wp wp-setup eval 'SW_Sender::run();'`
 
@@ -292,7 +293,7 @@ Each Node service reads its own `.env` (copy it from the project's `env.sample`)
 
 ## Database setup on a new environment
 
-`stuff/db/kleoshq_schema_and_reference_20261008.sql` recreates the Neon database: the full `public` schema (tables incl. `scan_reports`, the `uuidv7()` function, sequences, indexes, constraints, `v_ingestions`) plus reference rows (`sources`, `schema_migrations`, `ar_internal_metadata`, `events_projection_checkpoints`). It contains no ingestion or event data and does not require TimescaleDB.
+`stuff/db/kleoshq_schema_and_reference_20261008.sql` recreates the Neon database: the full `public` schema (tables incl. the app tables `channels`/`websites`/`sources`, `scan_reports`, the `uuidv7()` function, sequences, indexes, constraints, `v_ingestions`), plus reference rows (`channels`, `schema_migrations`, `ar_internal_metadata`, `events_projection_checkpoints`). It contains no ingestion or event data and does not require TimescaleDB.
 
 ```bash
 # restore into an EMPTY database
@@ -300,13 +301,14 @@ docker exec -i kleos_postgres psql "<target connection string>" -v ON_ERROR_STOP
   < stuff/db/kleoshq_schema_and_reference_20261008.sql
 ```
 
-Then set the real webhook secret (the dump stores `CHANGE_ME`):
+To bring websites and sources over from Supabase (uuids preserved; the output contains HMAC secrets, so pipe it, never save it):
 
-```sql
-UPDATE public.sources SET webhook_secret = '<secret>' WHERE slug = '<slug>';
+```bash
+node --env-file=kleoshq-sitewitness-agent/.env stuff/db/scripts/export_supabase_app_tables.mjs \
+  | docker exec -i kleoshq-postgres psql "<target owner connection string>" -v ON_ERROR_STOP=1
 ```
 
-The dump reflects the current `scan_reports` model. A database created from an **older** dump is upgraded with the migrations in [`stuff/db/migrations/`](stuff/db/migrations/): run `0002_create_scan_reports_and_backfill.sql` (additive — creates `scan_reports`, backfills from the old `ingestions` columns) then `0003_drop_analysis_columns_from_ingestions.sql` (drops `results`/analysis columns from `ingestions`; run only once the services are on the new code). Fresh databases from the dump need neither.
+The dump reflects the current `scan_reports` model. A database created from an **older** dump is upgraded with the migrations in [`stuff/db/migrations/`](stuff/db/migrations/): run `0002_create_scan_reports_and_backfill.sql` (additive — creates `scan_reports`, backfills from the old `ingestions` columns) then `0003_drop_analysis_columns_from_ingestions.sql` (drops `results`/analysis columns from `ingestions`; run only once the services are on the new code). Then `0004_app_tables_from_supabase.sql` moves the app tables from Supabase: it drops the legacy Rails `sources` (bigint) table, creates `channels`/`websites`/`sources` and seeds the channels (`0005` removed the short-lived `app_web`/row-level-security setup — the web app uses the owner connection). All services use the owner connection string. Fresh databases from the dump need none of these migrations.
 
 ---
 
@@ -331,7 +333,8 @@ The packaged plugin builds at the root (`wp-storerelay_*.zip`) are not committed
 
 ## Security notes
 
-- Every webhook is signed with HMAC-SHA256 over the raw body; secrets live in Supabase `sources.hmac` and in each plugin's settings.
+- Every webhook is signed with HMAC-SHA256 over the raw body; secrets live in Neon `sources.hmac` and in each plugin's settings.
+- The web app and the agents reach Neon with the owner connection string; the web app keeps each user to their own rows in code (every query filters on the signed-in user's id). The agents hold no Supabase credentials.
 - Changed-file collection never ships credential files: the plugin's `/collect` and the analyzer's file selection both deny `wp-config.php` (and variants/backups) and `.env` files, so their contents are never archived to R2 or sent to the AI (they are still md5-hashed for integrity). R2 credentials never reach the WordPress plugin — it only receives short-lived presigned PUT URLs.
 - `.env` files are never committed (root and subproject `.gitignore`s).
 - `stuff/procs/db_restore.txt` contains live database credentials and is git-ignored; keep it that way, and rotate the password if the file was ever shared.
