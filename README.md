@@ -263,6 +263,7 @@ docker compose down              # stop; add -v to drop the data too
 |---|---|---|
 | WordPress 7.1.1 with `wp-sitewitness` active | `kleoshq-wordpress` | http://localhost:8088 (`admin` / `admin_dev_password`) |
 | Second WordPress (fresh, for testing site registration) | `kleoshq-wordpress2` | http://localhost:8089 (`admin` / `admin_dev_password`) — opt-in: `docker compose up -d mysql2 wordpress2 wp-setup2` |
+| Third WordPress (fresh, same as wordpress2) | `kleoshq-wordpress3` | http://localhost:8090 (`admin` / `admin_dev_password`) — opt-in: `docker compose up -d mysql3 wordpress3 wp-setup3` |
 | public-www (`next dev`) | `kleoshq-public-www` | http://localhost:4000 |
 | sitewitness-agent | `kleoshq-sitewitness-agent` | http://localhost:4001/api/ingest/[slug] |
 | woocommerce-agent | `kleoshq-woocommerce-agent` | http://localhost:4002/api/webhooks/woocommerce/[slug] |
@@ -270,6 +271,7 @@ docker compose down              # stop; add -v to drop the data too
 | ingestion-analyzer | `kleoshq-ingestion-analyzer` | http://localhost:4004/api/analyze |
 | MySQL 8.4 (WordPress) | `kleoshq-mysql` | localhost:3307 |
 | MySQL 8.4 (second WordPress) | `kleoshq-mysql2` | localhost:3308 (opt-in, with `wordpress2`) |
+| MySQL 8.4 (third WordPress) | `kleoshq-mysql3` | localhost:3309 (opt-in, with `wordpress3`) |
 | PostgreSQL / TimescaleDB (event store) | `kleoshq-postgres` | localhost:5433, database `kleoshq_development` |
 
 - **Vercel functions** are served by `docker/node/vercel-fn-server.mjs`, a small stand-in for the Vercel runtime (file routing under `api/`, `req.query` / `req.body`, `res.status().json()`), run with `tsx watch`: the subproject folders are bind-mounted, edits reload. No Vercel login needed. **Caveat:** `tsx watch` does not reliably reload handlers/libs imported dynamically, so after editing a function service (processor/analyzer/agents) restart it: `docker compose restart <service>` (or `up -d <service>` if you changed its env). Code lives in the bind mount, so a rebuild is not needed for app changes.

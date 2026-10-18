@@ -218,6 +218,91 @@ services:
     restart: "no"
 
   # -------------------------------------------------------------------------
+  # Third WordPress site — same as wordpress2, another fresh install to test
+  # the registration flow from scratch.
+  # Opt-in: start with `docker compose up -d mysql3 wordpress3 wp-setup3`.
+  # -------------------------------------------------------------------------
+
+  mysql3:
+    image: mysql:8.4
+    container_name: kleoshq-mysql3
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-wordpress}
+      MYSQL_USER: ${MYSQL_USER:-wordpress}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-wordpress_dev_password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_dev_password}
+    volumes:
+      - mysql3_data:/var/lib/mysql
+    ports:
+      - "${MYSQL3_PORT:-3309}:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  wordpress3:
+    image: wordpress:7.1.1
+    container_name: kleoshq-wordpress3
+    depends_on:
+      mysql3:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DB_HOST: mysql3:3306
+      WORDPRESS_DB_NAME: ${MYSQL_DATABASE:-wordpress}
+      WORDPRESS_DB_USER: ${MYSQL_USER:-wordpress}
+      WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD:-wordpress_dev_password}
+      WORDPRESS_CONFIG_EXTRA: |
+        define('ALTERNATE_WP_CRON', true);
+        define('WP_AUTO_UPDATE_CORE', false);
+    volumes:
+      - wordpress3_data:/var/www/html
+      - ./wp-sitewitness:/var/www/html/wp-content/plugins/wp-sitewitness:ro
+      - ./wp-storerelay:/var/www/html/wp-content/plugins/wp-storerelay:ro
+    ports:
+      - "${WORDPRESS3_PORT:-8090}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /var/www/html/wp-includes/version.php && php -r 'exit(@fsockopen(\"localhost\", 80) ? 0 : 1);'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  wp-setup3:
+    image: wordpress:cli
+    container_name: kleoshq-wp-setup3
+    depends_on:
+      mysql3:
+        condition: service_healthy
+      wordpress3:
+        condition: service_healthy
+    user: "33:33"
+    environment:
+      WORDPRESS_DB_HOST: mysql3:3306
+      WORDPRESS_DB_NAME: ${MYSQL_DATABASE:-wordpress}
+      WORDPRESS_DB_USER: ${MYSQL_USER:-wordpress}
+      WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD:-wordpress_dev_password}
+      HOME: /tmp
+      WP_URL: http://localhost:${WORDPRESS3_PORT:-8090}
+      WP_TITLE: ${WP3_TITLE:-KleosHQ test site 3}
+      WP_ADMIN_USER: ${WP_ADMIN_USER:-admin}
+      WP_ADMIN_PASSWORD: ${WP_ADMIN_PASSWORD:-admin_dev_password}
+      WP_ADMIN_EMAIL: ${WP_ADMIN_EMAIL:-admin@example.com}
+      SITEWITNESS_AGENT_URL: http://sitewitness-agent:3000
+      # Left empty on purpose: unconfigured plugin, no scans yet.
+      SITEWITNESS_SOURCE_ID: ""
+      SITEWITNESS_HMAC_SECRET: ""
+      SITEWITNESS_SCHEDULE: ${SITEWITNESS_SCHEDULE:-daily}
+    volumes:
+      - wordpress3_data:/var/www/html
+      - ./wp-sitewitness:/var/www/html/wp-content/plugins/wp-sitewitness:ro
+      - ./wp-storerelay:/var/www/html/wp-content/plugins/wp-storerelay:ro
+      - ./docker/wordpress/setup.sh:/usr/local/bin/kleoshq-wp-setup:ro
+    entrypoint: ["sh", "/usr/local/bin/kleoshq-wp-setup"]
+    restart: "no"
+
+  # -------------------------------------------------------------------------
   # Event store (stands in for Neon)
   # -------------------------------------------------------------------------
 
@@ -392,6 +477,8 @@ volumes:
   wordpress_data:
   mysql2_data:
   wordpress2_data:
+  mysql3_data:
+  wordpress3_data:
   postgres_data:
   sitewitness_agent_node_modules:
   woocommerce_agent_node_modules:
