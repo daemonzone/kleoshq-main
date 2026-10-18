@@ -131,6 +131,93 @@ services:
     restart: "no"
 
   # -------------------------------------------------------------------------
+  # Second WordPress site — fresh, for testing site registration from scratch.
+  # Its own MySQL + volumes, so `docker compose down` + removing the volumes
+  # starts it over clean. SiteWitness is installed and active but UNCONFIGURED
+  # (no source id / webhook) → no scans until you wire it from the dashboard.
+  # Opt-in: start with `docker compose up -d mysql2 wordpress2 wp-setup2`.
+  # -------------------------------------------------------------------------
+
+  mysql2:
+    image: mysql:8.4
+    container_name: kleoshq-mysql2
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-wordpress}
+      MYSQL_USER: ${MYSQL_USER:-wordpress}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-wordpress_dev_password}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_dev_password}
+    volumes:
+      - mysql2_data:/var/lib/mysql
+    ports:
+      - "${MYSQL2_PORT:-3308}:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  wordpress2:
+    image: wordpress:7.1.1
+    container_name: kleoshq-wordpress2
+    depends_on:
+      mysql2:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DB_HOST: mysql2:3306
+      WORDPRESS_DB_NAME: ${MYSQL_DATABASE:-wordpress}
+      WORDPRESS_DB_USER: ${MYSQL_USER:-wordpress}
+      WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD:-wordpress_dev_password}
+      WORDPRESS_CONFIG_EXTRA: |
+        define('ALTERNATE_WP_CRON', true);
+        define('WP_AUTO_UPDATE_CORE', false);
+    volumes:
+      - wordpress2_data:/var/www/html
+      - ./wp-sitewitness:/var/www/html/wp-content/plugins/wp-sitewitness:ro
+      - ./wp-storerelay:/var/www/html/wp-content/plugins/wp-storerelay:ro
+    ports:
+      - "${WORDPRESS2_PORT:-8089}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /var/www/html/wp-includes/version.php && php -r 'exit(@fsockopen(\"localhost\", 80) ? 0 : 1);'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  wp-setup2:
+    image: wordpress:cli
+    container_name: kleoshq-wp-setup2
+    depends_on:
+      mysql2:
+        condition: service_healthy
+      wordpress2:
+        condition: service_healthy
+    user: "33:33"
+    environment:
+      WORDPRESS_DB_HOST: mysql2:3306
+      WORDPRESS_DB_NAME: ${MYSQL_DATABASE:-wordpress}
+      WORDPRESS_DB_USER: ${MYSQL_USER:-wordpress}
+      WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD:-wordpress_dev_password}
+      HOME: /tmp
+      WP_URL: http://localhost:${WORDPRESS2_PORT:-8089}
+      WP_TITLE: ${WP2_TITLE:-KleosHQ test site 2}
+      WP_ADMIN_USER: ${WP_ADMIN_USER:-admin}
+      WP_ADMIN_PASSWORD: ${WP_ADMIN_PASSWORD:-admin_dev_password}
+      WP_ADMIN_EMAIL: ${WP_ADMIN_EMAIL:-admin@example.com}
+      SITEWITNESS_AGENT_URL: http://sitewitness-agent:3000
+      # Left empty on purpose: unconfigured plugin, no scans yet.
+      SITEWITNESS_SOURCE_ID: ""
+      SITEWITNESS_HMAC_SECRET: ""
+      SITEWITNESS_SCHEDULE: ${SITEWITNESS_SCHEDULE:-daily}
+    volumes:
+      - wordpress2_data:/var/www/html
+      - ./wp-sitewitness:/var/www/html/wp-content/plugins/wp-sitewitness:ro
+      - ./wp-storerelay:/var/www/html/wp-content/plugins/wp-storerelay:ro
+      - ./docker/wordpress/setup.sh:/usr/local/bin/kleoshq-wp-setup:ro
+    entrypoint: ["sh", "/usr/local/bin/kleoshq-wp-setup"]
+    restart: "no"
+
+  # -------------------------------------------------------------------------
   # Event store (stands in for Neon)
   # -------------------------------------------------------------------------
 
@@ -289,6 +376,8 @@ services:
 volumes:
   mysql_data:
   wordpress_data:
+  mysql2_data:
+  wordpress2_data:
   postgres_data:
   sitewitness_agent_node_modules:
   woocommerce_agent_node_modules:
