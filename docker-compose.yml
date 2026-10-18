@@ -309,14 +309,19 @@ services:
       R2_BUCKET: ${R2_BUCKET:-sitewitness-archives}
       R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
       R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
-      # Per-site remap of the report's site_url (localhost:<port>) to the right
-      # WordPress service, so collect reaches the site that issued the nonce.
-      SITEWITNESS_COLLECT_HOST_MAP: "localhost:${WORDPRESS_PORT:-8088}=http://wordpress,localhost:${WORDPRESS2_PORT:-8089}=http://wordpress2"
+      # The collect target host comes from each report's own site_url
+      # (site_identifier) — the processor reaches every site it manages, no
+      # per-site config. Local dev only: the reported host is localhost:<port>,
+      # which from this container is the container, not the host; swap just the
+      # loopback host for the host gateway, keeping the port. Unset in prod.
+      SITEWITNESS_COLLECT_LOCALHOST_AS: host.docker.internal
     volumes:
       - ./kleoshq-ingestion-processor:/app
       - ingestion_processor_node_modules:/app/node_modules
     ports:
       - "${INGESTION_PROCESSOR_PORT:-4003}:3000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck: *vercel-function-healthcheck
 
   # POST /api/analyze { source_id }
