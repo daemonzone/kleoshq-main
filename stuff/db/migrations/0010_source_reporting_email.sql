@@ -1,9 +1,9 @@
 -- ---------------------------------------------------------------------------
--- 0011 — Reporting email per service (source)
+-- 0010 — Reporting email per service (source)
 -- ---------------------------------------------------------------------------
 -- Where malicious-scan alerts for THIS service are sent. Set when the service
--- is created (defaults to the owner's email in the UI). The analyzer prefers
--- it over the website's notification_email. Idempotent.
+-- is created (defaults to the owner's email in the UI); the analyzer sends the
+-- alert here. Idempotent.
 -- ---------------------------------------------------------------------------
 
 BEGIN;
