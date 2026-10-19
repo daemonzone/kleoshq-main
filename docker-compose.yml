@@ -427,12 +427,10 @@ services:
       # more/larger changed files are inspected in one call instead of omitted.
       AI_MAX_FILE_CONTENT_CHARS: ${AI_MAX_FILE_CONTENT_CHARS:-150000}
       AI_MAX_FILE_BYTES: ${AI_MAX_FILE_BYTES:-131072}
-      # Alert email on a malicious verdict (Resend). Blank RESEND_API_KEY/EMAIL_FROM
-      # = dry-run (logged). ALERT_EMAIL_TO is a fallback when a website has no
-      # notification_email. All from the root .env.
+      # Alert email on a malicious verdict (Resend), sent to the service's
+      # reporting_email. Blank RESEND_API_KEY/EMAIL_FROM = dry-run (logged).
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       EMAIL_FROM: ${EMAIL_FROM:-}
-      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-}
       # Cloudflare R2 (read): download <report_id>.zip for file-content analysis.
       # Same bucket the processor writes; blank = code inspection disabled.
       R2_ENDPOINT: ${R2_ENDPOINT:-}
