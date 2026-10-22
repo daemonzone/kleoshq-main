@@ -52,7 +52,9 @@ x-wordpress-db-env: &wordpress-db-env
 services:
 
   # -------------------------------------------------------------------------
-  # WordPress site under test
+  # WordPress sites under test — a SINGLE MySQL holds all three databases
+  # (wordpress, wordpress2, wordpress3). The extra two are created by the
+  # init script (runs once, on a fresh data volume).
   # -------------------------------------------------------------------------
 
   mysql:
@@ -65,6 +67,7 @@ services:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_dev_password}
     volumes:
       - mysql_data:/var/lib/mysql
+      - ./docker/mysql/init.sql:/docker-entrypoint-initdb.d/10-extra-dbs.sql:ro
     ports:
       - "${MYSQL_PORT:-3307}:3306"
     healthcheck:
@@ -131,41 +134,21 @@ services:
     restart: "no"
 
   # -------------------------------------------------------------------------
-  # Second WordPress site — fresh, for testing site registration from scratch.
-  # Its own MySQL + volumes, so `docker compose down` + removing the volumes
-  # starts it over clean. SiteWitness is installed and active but UNCONFIGURED
-  # (no source id / webhook) → no scans until you wire it from the dashboard.
-  # Opt-in: start with `docker compose up -d mysql2 wordpress2 wp-setup2`.
+  # Second WordPress site (wordpress2) — uses the SINGLE mysql, database
+  # "wordpress2". Fresh registration-flow test. SiteWitness installed/active
+  # but UNCONFIGURED (no source id / webhook).
+  # Opt-in: docker compose up -d wordpress2 wp-setup2
   # -------------------------------------------------------------------------
-
-  mysql2:
-    image: mysql:8.4
-    container_name: kleoshq-mysql2
-    environment:
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-wordpress}
-      MYSQL_USER: ${MYSQL_USER:-wordpress}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-wordpress_dev_password}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_dev_password}
-    volumes:
-      - mysql2_data:/var/lib/mysql
-    ports:
-      - "${MYSQL2_PORT:-3308}:3306"
-    healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-      start_period: 30s
 
   wordpress2:
     image: wordpress:7.1.1
     container_name: kleoshq-wordpress2
     depends_on:
-      mysql2:
+      mysql:
         condition: service_healthy
     environment:
-      WORDPRESS_DB_HOST: mysql2:3306
-      WORDPRESS_DB_NAME: ${MYSQL_DATABASE:-wordpress}
+      WORDPRESS_DB_HOST: mysql:3306
+      WORDPRESS_DB_NAME: wordpress2
       WORDPRESS_DB_USER: ${MYSQL_USER:-wordpress}
       WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD:-wordpress_dev_password}
       WORDPRESS_CONFIG_EXTRA: |
@@ -188,14 +171,14 @@ services:
     image: wordpress:cli
     container_name: kleoshq-wp-setup2
     depends_on:
-      mysql2:
+      mysql:
         condition: service_healthy
       wordpress2:
         condition: service_healthy
     user: "33:33"
     environment:
-      WORDPRESS_DB_HOST: mysql2:3306
-      WORDPRESS_DB_NAME: ${MYSQL_DATABASE:-wordpress}
+      WORDPRESS_DB_HOST: mysql:3306
+      WORDPRESS_DB_NAME: wordpress2
       WORDPRESS_DB_USER: ${MYSQL_USER:-wordpress}
       WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD:-wordpress_dev_password}
       HOME: /tmp
@@ -218,39 +201,19 @@ services:
     restart: "no"
 
   # -------------------------------------------------------------------------
-  # Third WordPress site — same as wordpress2, another fresh install to test
-  # the registration flow from scratch.
-  # Opt-in: start with `docker compose up -d mysql3 wordpress3 wp-setup3`.
+  # Third WordPress site (wordpress3) — single mysql, database "wordpress3".
+  # Opt-in: docker compose up -d wordpress3 wp-setup3
   # -------------------------------------------------------------------------
-
-  mysql3:
-    image: mysql:8.4
-    container_name: kleoshq-mysql3
-    environment:
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-wordpress}
-      MYSQL_USER: ${MYSQL_USER:-wordpress}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-wordpress_dev_password}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_dev_password}
-    volumes:
-      - mysql3_data:/var/lib/mysql
-    ports:
-      - "${MYSQL3_PORT:-3309}:3306"
-    healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-      start_period: 30s
 
   wordpress3:
     image: wordpress:7.1.1
     container_name: kleoshq-wordpress3
     depends_on:
-      mysql3:
+      mysql:
         condition: service_healthy
     environment:
-      WORDPRESS_DB_HOST: mysql3:3306
-      WORDPRESS_DB_NAME: ${MYSQL_DATABASE:-wordpress}
+      WORDPRESS_DB_HOST: mysql:3306
+      WORDPRESS_DB_NAME: wordpress3
       WORDPRESS_DB_USER: ${MYSQL_USER:-wordpress}
       WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD:-wordpress_dev_password}
       WORDPRESS_CONFIG_EXTRA: |
@@ -273,14 +236,14 @@ services:
     image: wordpress:cli
     container_name: kleoshq-wp-setup3
     depends_on:
-      mysql3:
+      mysql:
         condition: service_healthy
       wordpress3:
         condition: service_healthy
     user: "33:33"
     environment:
-      WORDPRESS_DB_HOST: mysql3:3306
-      WORDPRESS_DB_NAME: ${MYSQL_DATABASE:-wordpress}
+      WORDPRESS_DB_HOST: mysql:3306
+      WORDPRESS_DB_NAME: wordpress3
       WORDPRESS_DB_USER: ${MYSQL_USER:-wordpress}
       WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD:-wordpress_dev_password}
       HOME: /tmp
@@ -296,6 +259,74 @@ services:
       SITEWITNESS_SCHEDULE: ${SITEWITNESS_SCHEDULE:-daily}
     volumes:
       - wordpress3_data:/var/www/html
+      - ./wp-sitewitness:/var/www/html/wp-content/plugins/wp-sitewitness:ro
+      - ./wp-storerelay:/var/www/html/wp-content/plugins/wp-storerelay:ro
+      - ./docker/wordpress/setup.sh:/usr/local/bin/kleoshq-wp-setup:ro
+    entrypoint: ["sh", "/usr/local/bin/kleoshq-wp-setup"]
+    restart: "no"
+
+  # -------------------------------------------------------------------------
+  # Fourth WordPress site (wordpress4) — CLEAN install of WordPress 6.8.1 (the
+  # version of the pattyboop backup in stuff/dumps/20260405), database
+  # "wordpress4" on the single mysql, wp-sitewitness installed and active but
+  # UNCONFIGURED (no source id / webhook).
+  # Opt-in: docker compose up -d wordpress4 wp-setup4
+  # -------------------------------------------------------------------------
+
+  wordpress4:
+    image: wordpress:6.8.1-php8.3-apache
+    container_name: kleoshq-wordpress4
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DB_HOST: mysql:3306
+      WORDPRESS_DB_NAME: wordpress4
+      WORDPRESS_DB_USER: ${MYSQL_USER:-wordpress}
+      WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD:-wordpress_dev_password}
+      WORDPRESS_CONFIG_EXTRA: |
+        define('ALTERNATE_WP_CRON', true);
+        define('WP_AUTO_UPDATE_CORE', false);
+    volumes:
+      - wordpress4_data:/var/www/html
+      - ./wp-sitewitness:/var/www/html/wp-content/plugins/wp-sitewitness:ro
+      - ./wp-storerelay:/var/www/html/wp-content/plugins/wp-storerelay:ro
+    ports:
+      - "${WORDPRESS4_PORT:-8091}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /var/www/html/wp-includes/version.php && php -r 'exit(@fsockopen(\"localhost\", 80) ? 0 : 1);'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  wp-setup4:
+    image: wordpress:cli
+    container_name: kleoshq-wp-setup4
+    depends_on:
+      mysql:
+        condition: service_healthy
+      wordpress4:
+        condition: service_healthy
+    user: "33:33"
+    environment:
+      WORDPRESS_DB_HOST: mysql:3306
+      WORDPRESS_DB_NAME: wordpress4
+      WORDPRESS_DB_USER: ${MYSQL_USER:-wordpress}
+      WORDPRESS_DB_PASSWORD: ${MYSQL_PASSWORD:-wordpress_dev_password}
+      HOME: /tmp
+      WP_URL: http://localhost:${WORDPRESS4_PORT:-8091}
+      WP_TITLE: ${WP4_TITLE:-KleosHQ test site 4}
+      WP_ADMIN_USER: ${WP_ADMIN_USER:-admin}
+      WP_ADMIN_PASSWORD: ${WP_ADMIN_PASSWORD:-admin_dev_password}
+      WP_ADMIN_EMAIL: ${WP_ADMIN_EMAIL:-admin@example.com}
+      SITEWITNESS_AGENT_URL: http://sitewitness-agent:3000
+      # Left empty on purpose: unconfigured plugin, no scans yet.
+      SITEWITNESS_SOURCE_ID: ""
+      SITEWITNESS_HMAC_SECRET: ""
+      SITEWITNESS_SCHEDULE: ${SITEWITNESS_SCHEDULE:-daily}
+    volumes:
+      - wordpress4_data:/var/www/html
       - ./wp-sitewitness:/var/www/html/wp-content/plugins/wp-sitewitness:ro
       - ./wp-storerelay:/var/www/html/wp-content/plugins/wp-storerelay:ro
       - ./docker/wordpress/setup.sh:/usr/local/bin/kleoshq-wp-setup:ro
@@ -320,7 +351,7 @@ services:
       # Schema + reference rows (already includes scan_reports and the trimmed
       # ingestions), applied only when the data volume is empty. The 0002/0003
       # migrations are for upgrading EXISTING databases, not fresh ones.
-      - ./stuff/db/kleoshq_schema_and_reference_20261008.sql:/docker-entrypoint-initdb.d/900_kleoshq_schema.sql:ro
+      - ./stuff/db/kleoshq_schema_and_reference_20261022.sql:/docker-entrypoint-initdb.d/900_kleoshq_schema.sql:ro
     ports:
       - "${POSTGRES_PORT:-5433}:5432"
     networks:
@@ -468,6 +499,12 @@ services:
       DATABASE_URL: *eventstore-url
       # Opening an incident asks the analyzer for a remediation plan.
       ANALYZER_URL: http://ingestion-analyzer:3000
+      # Incident page: download of the evidence archive (presigned GET, read-only use).
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
+      R2_REGION: ${R2_REGION:-auto}
+      R2_BUCKET: ${R2_BUCKET:-sitewitness-archives}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
     volumes:
       - ./kleoshq-public-www:/app
       - public_www_node_modules:/app/node_modules
@@ -479,10 +516,9 @@ services:
 volumes:
   mysql_data:
   wordpress_data:
-  mysql2_data:
   wordpress2_data:
-  mysql3_data:
   wordpress3_data:
+  wordpress4_data:
   postgres_data:
   sitewitness_agent_node_modules:
   woocommerce_agent_node_modules:

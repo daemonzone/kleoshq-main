@@ -48,7 +48,7 @@ CREATE TABLE IF NOT EXISTS public.scan_reports (
     results            jsonb NOT NULL DEFAULT '{}'::jsonb,   -- wp.events diff (processor)
     analyzed_at        timestamp with time zone,             -- NULL = not yet analyzed
     analysis_results   jsonb NOT NULL DEFAULT '{}'::jsonb,   -- AI verdict (analyzer)
-    analysis_status    character varying,                    -- legit | malicious | unknown
+    analysis_status    character varying,                    -- legit | malicious | suspicious (was "unknown" until migration 0011)
     analysis_certainty integer,
     created_at         timestamp with time zone NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT scan_reports_ingestion_id_key UNIQUE (ingestion_id),
