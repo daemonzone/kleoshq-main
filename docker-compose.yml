@@ -87,11 +87,9 @@ services:
       <<: *wordpress-db-env
     volumes:
       - wordpress_data:/var/www/html
-      # Plugin repositories, read-only so WordPress can never delete or
-      # overwrite them. wp-storerelay is available but left inactive
-      # (it needs WooCommerce).
+      # Plugin repository, read-only so WordPress can never delete or
+      # overwrite it.
       - ./wp-sitewitness:/var/www/html/wp-content/plugins/wp-sitewitness:ro
-      - ./wp-storerelay:/var/www/html/wp-content/plugins/wp-storerelay:ro
     ports:
       - "${WORDPRESS_PORT:-8088}:80"
     healthcheck:
@@ -128,7 +126,6 @@ services:
     volumes:
       - wordpress_data:/var/www/html
       - ./wp-sitewitness:/var/www/html/wp-content/plugins/wp-sitewitness:ro
-      - ./wp-storerelay:/var/www/html/wp-content/plugins/wp-storerelay:ro
       - ./docker/wordpress/setup.sh:/usr/local/bin/kleoshq-wp-setup:ro
     entrypoint: ["sh", "/usr/local/bin/kleoshq-wp-setup"]
     restart: "no"
@@ -157,7 +154,6 @@ services:
     volumes:
       - wordpress2_data:/var/www/html
       - ./wp-sitewitness:/var/www/html/wp-content/plugins/wp-sitewitness:ro
-      - ./wp-storerelay:/var/www/html/wp-content/plugins/wp-storerelay:ro
     ports:
       - "${WORDPRESS2_PORT:-8089}:80"
     healthcheck:
@@ -195,7 +191,6 @@ services:
     volumes:
       - wordpress2_data:/var/www/html
       - ./wp-sitewitness:/var/www/html/wp-content/plugins/wp-sitewitness:ro
-      - ./wp-storerelay:/var/www/html/wp-content/plugins/wp-storerelay:ro
       - ./docker/wordpress/setup.sh:/usr/local/bin/kleoshq-wp-setup:ro
     entrypoint: ["sh", "/usr/local/bin/kleoshq-wp-setup"]
     restart: "no"
@@ -222,7 +217,6 @@ services:
     volumes:
       - wordpress3_data:/var/www/html
       - ./wp-sitewitness:/var/www/html/wp-content/plugins/wp-sitewitness:ro
-      - ./wp-storerelay:/var/www/html/wp-content/plugins/wp-storerelay:ro
     ports:
       - "${WORDPRESS3_PORT:-8090}:80"
     healthcheck:
@@ -260,7 +254,6 @@ services:
     volumes:
       - wordpress3_data:/var/www/html
       - ./wp-sitewitness:/var/www/html/wp-content/plugins/wp-sitewitness:ro
-      - ./wp-storerelay:/var/www/html/wp-content/plugins/wp-storerelay:ro
       - ./docker/wordpress/setup.sh:/usr/local/bin/kleoshq-wp-setup:ro
     entrypoint: ["sh", "/usr/local/bin/kleoshq-wp-setup"]
     restart: "no"
@@ -290,7 +283,6 @@ services:
     volumes:
       - wordpress4_data:/var/www/html
       - ./wp-sitewitness:/var/www/html/wp-content/plugins/wp-sitewitness:ro
-      - ./wp-storerelay:/var/www/html/wp-content/plugins/wp-storerelay:ro
     ports:
       - "${WORDPRESS4_PORT:-8091}:80"
     healthcheck:
@@ -328,7 +320,6 @@ services:
     volumes:
       - wordpress4_data:/var/www/html
       - ./wp-sitewitness:/var/www/html/wp-content/plugins/wp-sitewitness:ro
-      - ./wp-storerelay:/var/www/html/wp-content/plugins/wp-storerelay:ro
       - ./docker/wordpress/setup.sh:/usr/local/bin/kleoshq-wp-setup:ro
     entrypoint: ["sh", "/usr/local/bin/kleoshq-wp-setup"]
     restart: "no"
